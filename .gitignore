@@ -1,0 +1,14 @@
+﻿__pycache__/
+*.pyc
+venv/
+.env
+db.sqlite3
+staticfiles/
+logs/
+*.log
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+distressed_properties_backend/
+distressed_properties_frontend/
+us_tax_sale_db/

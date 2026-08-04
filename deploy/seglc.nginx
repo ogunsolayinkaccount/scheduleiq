@@ -1,0 +1,31 @@
+server {
+    listen 80;
+    server_name _;          # matches any hostname / IP — replace with your domain if you have one
+
+    # Allow large file uploads (XER / PDF schedule files)
+    client_max_body_size 150M;
+
+    # ── Serve the React frontend (built static files) ──────────────────────
+    location / {
+        root   /home/azureuser/seglc_backend/frontend/dist;
+        index  index.html;
+        try_files $uri $uri/ /index.html;   # SPA fallback
+    }
+
+    # ── Proxy API calls to Django/Gunicorn ──────────────────────────────────
+    location /api/ {
+        proxy_pass         http://unix:/run/seglc.sock;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;            # allow time for large schedule processing
+        proxy_send_timeout 120s;
+        client_max_body_size 150M;
+    }
+
+    # ── Django static files (admin, etc.) ───────────────────────────────────
+    location /static/ {
+        alias /home/azureuser/seglc_backend/staticfiles/;
+    }
+}

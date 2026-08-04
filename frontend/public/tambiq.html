@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tamb.iQ">
+<meta name="theme-color" content="#0c1022">
+<title>Tamb.iQ — Property Intelligence</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --ink:#0c1022;--ink2:#18213a;--surface:#f0ede8;--card:#ffffff;
+  --gold:#c9973a;--gold2:#e4b85a;--gold3:#f5d48a;
+  --green:#157a4e;--red:#b83232;--blue:#1653a0;--purple:#6b3fa0;
+  --border:rgba(12,16,34,0.09);--shadow:0 1px 12px rgba(12,16,34,0.07);
+  --r:10px;--font:'DM Sans',sans-serif;--mono:'DM Mono',monospace
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--surface);color:var(--ink);height:100vh;overflow:hidden;font-size:14px}
+.app{display:flex;flex-direction:column;height:100vh}
+.topbar{background:var(--ink);height:52px;display:flex;align-items:center;padding:0 20px;gap:14px;flex-shrink:0;border-bottom:2px solid var(--gold)}
+.logo{font-size:20px;font-weight:700;color:#fff;letter-spacing:-0.5px;line-height:1}
+.logo em{color:var(--gold);font-style:normal}
+.logo-tag{font-size:9px;color:rgba(255,255,255,0.35);font-family:var(--mono);letter-spacing:2px;margin-top:1px}
+.live-badge{display:flex;align-items:center;gap:5px;background:rgba(21,122,78,0.2);border:1px solid rgba(21,122,78,0.35);border-radius:20px;padding:3px 10px;font-size:10px;font-family:var(--mono);color:#4ade80}
+.live-dot{width:6px;height:6px;border-radius:50%;background:#4ade80;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.tb-btn{padding:5px 12px;background:rgba(201,151,58,0.15);border:1px solid rgba(201,151,58,0.3);border-radius:6px;color:var(--gold2);font-size:11px;font-family:var(--font);font-weight:600;cursor:pointer;transition:all 0.15s}
+.tb-btn:hover{background:rgba(201,151,58,0.25)}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--gold);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:var(--ink)}
+.body-row{flex:1;display:flex;overflow:hidden}
+.sidebar{width:200px;flex-shrink:0;background:var(--ink2);display:flex;flex-direction:column;padding:8px 0;overflow-y:auto;border-right:2px solid rgba(201,151,58,0.15)}
+.content-col{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.navtab{padding:11px 16px;font-size:11px;font-weight:600;color:rgba(255,255,255,0.45);cursor:pointer;border:none;background:transparent;text-transform:uppercase;letter-spacing:0.5px;transition:all 0.18s;display:flex;align-items:center;gap:10px;white-space:nowrap;border-left:3px solid transparent;position:relative;width:100%;text-align:left}
+.navtab i{font-size:13px;width:15px;text-align:center;flex-shrink:0}
+.navtab:hover{color:rgba(255,255,255,0.8);background:rgba(255,255,255,0.03)}
+.navtab.active{color:var(--gold2);border-left-color:var(--gold);background:rgba(201,151,58,0.08)}
+.navtab .badge-count{position:static;margin-left:auto;background:var(--gold);color:var(--ink);border-radius:10px;font-size:9px;padding:1px 6px;font-weight:700;line-height:1.4}
+.quickbar{display:flex;gap:8px;padding:11px 18px;background:var(--card);border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto}
+.qf-btn{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:20px;border:1.5px solid var(--border);background:var(--surface);font-family:var(--font);font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;white-space:nowrap;color:var(--ink)}
+.qf-btn:hover{border-color:var(--gold)}
+.qf-btn.active{background:var(--ink);color:#fff;border-color:var(--ink)}
+.qf-btn .qf-count{font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:10px;background:rgba(12,16,34,0.08);font-weight:700}
+.qf-btn.active .qf-count{background:rgba(255,255,255,0.18);color:#fff}
+.qf-lien i{color:#a07000}.qf-deed i{color:var(--blue)}.qf-fore i{color:var(--red)}.qf-watch i{color:var(--green)}
+.main{flex:1;overflow:hidden;display:flex}
+.panel{flex:1;overflow-y:auto;padding:18px;display:none}
+.panel.active{display:block}
+.card{background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:16px;margin-bottom:14px;box-shadow:var(--shadow)}
+.card-hd{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.6px;color:rgba(12,16,34,0.5);margin-bottom:12px;display:flex;align-items:center;gap:7px}
+.card-hd i{color:var(--gold);font-size:12px}
+.stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px}
+.stat{background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:12px 14px;box-shadow:var(--shadow)}
+.stat-lbl{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:rgba(12,16,34,0.4);font-weight:600;margin-bottom:4px}
+.stat-val{font-size:22px;font-weight:700;font-family:var(--mono);line-height:1}
+.stat-sub{font-size:10px;color:rgba(12,16,34,0.4);margin-top:3px}
+.search-bar{display:flex;gap:8px;margin-bottom:11px}
+.search-input{flex:1;padding:9px 13px;border:1.5px solid var(--border);border-radius:var(--r);font-family:var(--font);font-size:14px;background:var(--card);outline:none;transition:border 0.15s}
+.search-input:focus{border-color:var(--gold)}
+.filter-row{display:flex;gap:7px;margin-bottom:13px;flex-wrap:wrap}
+.sel{padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font);font-size:12px;background:var(--card);cursor:pointer;outline:none}
+.sel:focus{border-color:var(--gold)}
+.btn{padding:8px 16px;background:var(--gold);color:var(--ink);border:none;border-radius:var(--r);font-family:var(--font);font-weight:600;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background 0.15s;white-space:nowrap}
+.btn:hover{background:var(--gold2)}
+.btn-ghost{background:var(--card);color:var(--ink);border:1.5px solid var(--border)}
+.btn-ghost:hover{border-color:var(--gold);background:var(--surface)}
+.btn-sm{padding:6px 12px;font-size:11px;border-radius:7px}
+.prop-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.prop-card{background:var(--card);border-radius:var(--r);border:1px solid var(--border);overflow:hidden;cursor:pointer;transition:all 0.18s;box-shadow:var(--shadow)}
+.prop-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(12,16,34,0.11);border-color:var(--gold)}
+.prop-img{height:95px;background:linear-gradient(135deg,#e8e4dc,#d8d3c8);display:flex;align-items:center;justify-content:center;color:rgba(12,16,34,0.12);font-size:36px}
+.prop-badges{display:flex;gap:4px;padding:8px 11px 3px;flex-wrap:wrap}
+.bdg{font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;font-family:var(--mono);letter-spacing:0.3px}
+.bdg-lien{background:#fef3cd;color:#7a5c00}
+.bdg-deed{background:#d0f4fc;color:#0b5263}
+.bdg-fore{background:#fce8e8;color:#7a1f1f}
+.bdg-auction{background:rgba(201,151,58,0.12);color:#7a5500;border:1px solid rgba(201,151,58,0.35)}
+.bdg-saved{background:rgba(21,122,78,0.1);color:#0d5535;border:1px solid rgba(21,122,78,0.25)}
+.prop-body{padding:4px 11px 9px}
+.prop-addr{font-size:13px;font-weight:600;line-height:1.3;margin-bottom:2px}
+.prop-cnty{font-size:10px;color:rgba(12,16,34,0.45);font-family:var(--mono);margin-bottom:6px}
+.prop-meta{display:flex;justify-content:space-between;align-items:flex-end}
+.prop-price{font-size:16px;font-weight:700;color:var(--green)}
+.prop-arv{font-size:10px;color:rgba(12,16,34,0.45)}
+.prop-actions{display:flex;gap:5px;padding:0 10px 9px}
+.act-btn{flex:1;padding:5px 4px;border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;background:var(--card);font-family:var(--font);transition:all 0.12s;display:flex;align-items:center;justify-content:center;gap:3px}
+.act-btn:hover{background:var(--surface);border-color:var(--gold)}
+.act-btn.primary{background:var(--gold);color:var(--ink);border-color:var(--gold)}
+.act-btn.primary:hover{background:var(--gold2)}
+.act-btn.saved{background:rgba(21,122,78,0.08);color:var(--green);border-color:rgba(21,122,78,0.3)}
+.map-layout{display:flex;gap:12px;height:calc(100vh - 130px)}
+.map-side{width:255px;flex-shrink:0;overflow-y:auto}
+.map-area{flex:1;background:var(--card);border-radius:var(--r);border:1px solid var(--border);overflow:hidden;position:relative}
+.map-bg{position:absolute;inset:0;background:linear-gradient(160deg,#e8f2ea,#d8ecdf 50%,#e4ecdb)}
+.map-grid-lines{position:absolute;inset:0;background-image:repeating-linear-gradient(0deg,rgba(12,16,34,0.03) 0,rgba(12,16,34,0.03) 1px,transparent 1px,transparent 48px),repeating-linear-gradient(90deg,rgba(12,16,34,0.03) 0,rgba(12,16,34,0.03) 1px,transparent 1px,transparent 48px)}
+.map-pin{position:absolute;cursor:pointer;transform:translate(-50%,-100%);transition:transform 0.15s}
+.map-pin:hover{transform:translate(-50%,-100%) scale(1.2)}
+.pin-bubble{width:32px;height:32px;border-radius:50% 50% 50% 0;border:2px solid rgba(12,16,34,0.55);display:flex;align-items:center;justify-content:center;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.2)}
+.pin-bubble i{transform:rotate(45deg);font-size:10px;color:var(--ink)}
+.pin-lien .pin-bubble{background:var(--gold)}
+.pin-deed .pin-bubble{background:#3baac0}
+.pin-fore .pin-bubble{background:#c03b3b;border-color:rgba(255,255,255,0.4)}
+.pin-fore .pin-bubble i{color:#fff}
+.map-legend{position:absolute;bottom:14px;left:14px;background:rgba(255,255,255,0.95);border-radius:8px;padding:9px 12px;border:1px solid var(--border)}
+.leg-item{display:flex;align-items:center;gap:7px;font-size:11px;margin-bottom:4px}
+.leg-item:last-child{margin-bottom:0}
+.leg-dot{width:10px;height:10px;border-radius:50%}
+.map-tt{position:absolute;background:var(--ink);color:#fff;padding:10px 13px;border-radius:8px;font-size:11px;pointer-events:none;z-index:10;min-width:175px;box-shadow:0 4px 20px rgba(0,0,0,0.3);display:none}
+.map-ctrls{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:4px}
+.map-ctrl{width:31px;height:31px;background:rgba(255,255,255,0.95);border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px}
+.mini-prop{display:flex;gap:8px;padding:8px;border-radius:8px;cursor:pointer;transition:all 0.12s;border:1px solid transparent;margin-bottom:3px}
+.mini-prop:hover{background:rgba(201,151,58,0.07);border-color:rgba(201,151,58,0.25)}
+.mini-icon{width:34px;height:34px;border-radius:6px;background:var(--surface);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.mini-info{flex:1;min-width:0}
+.mini-addr{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini-price{font-size:12px;font-weight:700;color:var(--green);font-family:var(--mono)}
+.mini-cnty{font-size:10px;color:rgba(12,16,34,0.4);font-family:var(--mono)}
+/* API KEY BOX */
+.api-key-bar{background:rgba(201,151,58,0.08);border:1px solid rgba(201,151,58,0.25);border-radius:8px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px}
+.api-key-inp{flex:1;padding:7px 11px;border:1.5px solid rgba(255,255,255,0.15);border-radius:7px;background:var(--ink2);color:#fff;font-family:var(--mono);font-size:12px;outline:none}
+.api-key-inp::placeholder{color:rgba(255,255,255,0.3)}
+.api-key-inp:focus{border-color:rgba(201,151,58,0.5)}
+/* AI PANEL */
+.ai-hero{background:linear-gradient(135deg,var(--ink2),#0c1832);border-radius:var(--r);border:1px solid rgba(201,151,58,0.2);padding:20px;margin-bottom:14px}
+.ai-hd{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.ai-icon{width:44px;height:44px;border-radius:10px;background:rgba(201,151,58,0.12);border:1px solid rgba(201,151,58,0.25);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.ai-title{font-size:16px;font-weight:700;color:#fff}
+.ai-sub{font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px}
+.ai-prop-sel{width:100%;padding:9px 12px;border:1.5px solid rgba(255,255,255,0.12);border-radius:8px;background:rgba(255,255,255,0.05);color:#fff;font-family:var(--font);font-size:13px;outline:none;margin-bottom:13px}
+.ai-prop-sel option{background:var(--ink2);color:#fff}
+.ai-modules{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:14px}
+.ai-mod{padding:9px 12px;border:1.5px solid rgba(255,255,255,0.08);border-radius:8px;background:rgba(255,255,255,0.02);color:rgba(255,255,255,0.6);font-family:var(--font);font-size:11px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:all 0.15s;user-select:none}
+.ai-mod:hover{border-color:rgba(201,151,58,0.3);color:rgba(255,255,255,0.85)}
+.ai-mod.on{border-color:rgba(201,151,58,0.5);background:rgba(201,151,58,0.07);color:#fff}
+.ai-mod i{font-size:12px;color:var(--gold2);flex-shrink:0}
+.ai-mod .chk{width:14px;height:14px;border-radius:3px;border:1.5px solid rgba(255,255,255,0.2);margin-left:auto;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:9px;transition:all 0.15s}
+.ai-mod.on .chk{background:var(--gold);border-color:var(--gold);color:var(--ink)}
+.ai-run{width:100%;padding:12px;background:var(--gold);color:var(--ink);border:none;border-radius:8px;font-family:var(--font);font-weight:700;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:9px;transition:all 0.15s}
+.ai-run:hover:not(:disabled){background:var(--gold2)}
+.ai-run:disabled{opacity:0.55;cursor:not-allowed}
+.ai-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}
+.ai-metric{background:rgba(255,255,255,0.05);border-radius:8px;padding:10px 12px;text-align:center}
+.ai-metric-val{font-size:18px;font-weight:700;color:#fff;font-family:var(--mono)}
+.ai-metric-lbl{font-size:9px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.5px;margin-top:3px}
+.ai-result{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.09);border-radius:9px;padding:15px;margin-top:12px;color:#dde4f0;font-size:12px;line-height:1.75;min-height:60px;white-space:pre-wrap}
+.ai-result.streaming::after{content:'●';animation:blink 0.7s infinite;color:var(--gold2)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+.score-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-weight:700;font-size:13px;font-family:var(--mono)}
+.sc-A{background:rgba(74,222,128,0.18);color:#4ade80;border:1px solid rgba(74,222,128,0.3)}
+.sc-B{background:rgba(251,191,36,0.18);color:#fbbf24;border:1px solid rgba(251,191,36,0.3)}
+.sc-C{background:rgba(248,113,113,0.18);color:#f87171;border:1px solid rgba(248,113,113,0.3)}
+.calc-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.c-group{margin-bottom:10px}
+.c-lbl{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:rgba(12,16,34,0.5);margin-bottom:4px}
+.c-inp{width:100%;padding:8px 11px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--mono);font-size:14px;font-weight:500;background:var(--surface);outline:none;transition:border 0.15s}
+.c-inp:focus{border-color:var(--gold);background:#fff}
+.results-panel{background:var(--ink);color:#fff;border-radius:var(--r);overflow:hidden}
+.results-hd{background:linear-gradient(135deg,var(--ink2),#0d1628);padding:14px 16px}
+.r-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)}
+.r-row:last-child{border-bottom:none}
+.r-lbl{font-size:11px;color:rgba(255,255,255,0.5)}
+.r-val{font-size:12px;font-weight:700;font-family:var(--mono)}
+.r-val.g{color:#4ade80}.r-val.r{color:#f87171}.r-val.a{color:var(--gold2)}.r-val.w{color:#fff}
+.gauge{height:4px;background:rgba(255,255,255,0.08);border-radius:2px;margin-top:7px;overflow:hidden}
+.gauge-fill{height:100%;border-radius:2px;transition:width 0.5s,background 0.5s}
+.port-tabs{display:flex;gap:7px;margin-bottom:13px}
+.port-tab{padding:6px 14px;border-radius:6px;border:1.5px solid var(--border);font-size:11px;font-weight:600;cursor:pointer;background:var(--card);font-family:var(--font);transition:all 0.15s}
+.port-tab.active{background:var(--gold);color:var(--ink);border-color:var(--gold)}
+.port-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-bottom:14px}
+.ps-card{background:var(--card);border-radius:var(--r);border:1px solid var(--border);padding:11px 13px;text-align:center}
+.ps-val{font-size:18px;font-weight:700;font-family:var(--mono)}
+.ps-lbl{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;color:rgba(12,16,34,0.4);margin-top:3px}
+.port-tbl{width:100%;border-collapse:collapse}
+.port-tbl th{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;padding:7px 11px;text-align:left;background:var(--surface);color:rgba(12,16,34,0.45);border-bottom:1px solid var(--border);font-weight:600}
+.port-tbl td{padding:8px 11px;border-bottom:1px solid var(--border);font-size:12px;vertical-align:middle}
+.port-tbl tr:hover td{background:rgba(201,151,58,0.03)}
+.ps-badge{font-size:9px;font-family:var(--mono);padding:2px 7px;border-radius:4px;font-weight:600}
+.ps-watch{background:#fef3cd;color:#7a5c00}
+.ps-active{background:#d0f4e8;color:#0d5535}
+.ps-closed{background:#ede8f5;color:#3a2070}
+.scope-tbl{width:100%;border-collapse:separate;border-spacing:0 5px}
+.scope-tbl th{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:rgba(12,16,34,0.45);font-weight:600;padding:3px 9px;text-align:left}
+.sc-row td{padding:7px 9px;background:var(--card);font-size:12px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.sc-row td:first-child{border-left:1px solid var(--border);border-radius:7px 0 0 7px}
+.sc-row td:last-child{border-right:1px solid var(--border);border-radius:0 7px 7px 0}
+.sc-inp{width:100%;border:none;background:transparent;font-family:var(--mono);font-size:12px;outline:none}
+.cat-pill{font-size:9px;padding:2px 7px;border-radius:4px;font-weight:700;font-family:var(--mono)}
+.c-str{background:#fce8e8;color:#842020}.c-mec{background:#e8effe;color:#1a2570}
+.c-cos{background:#e8fef0;color:#0d5535}.c-ext{background:#fef8e8;color:#6b4c00}
+.scope-footer{display:flex;justify-content:space-between;align-items:center;padding:12px 15px;background:var(--ink);color:#fff;border-radius:var(--r);margin-top:9px}
+.add-line{width:100%;padding:7px;border:1.5px dashed var(--border);border-radius:7px;background:transparent;font-family:var(--font);font-size:11px;cursor:pointer;color:rgba(12,16,34,0.45);transition:all 0.15s;margin-top:8px}
+.add-line:hover{border-color:var(--gold);color:var(--gold)}
+.dd-prog-wrap{display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--card);border-radius:var(--r);border:1px solid var(--border);margin-bottom:13px}
+.dd-prog-bar{flex:1;height:7px;background:var(--surface);border-radius:4px;overflow:hidden}
+.dd-prog-fill{height:100%;background:var(--green);border-radius:4px;transition:width 0.4s}
+.dd-item{display:flex;align-items:flex-start;gap:9px;padding:6px 0;border-bottom:1px solid var(--border);cursor:pointer}
+.dd-chk{width:17px;height:17px;border-radius:4px;border:1.5px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all 0.15s;margin-top:1px}
+.dd-chk.on{background:var(--green);border-color:var(--green);color:#fff}
+.dd-txt{font-size:12px;line-height:1.4;flex:1}
+.dd-txt small{display:block;font-size:10px;color:rgba(12,16,34,0.45);margin-top:1px}
+.dd-st{font-size:9px;font-family:var(--mono);padding:2px 7px;border-radius:4px;margin-left:auto;flex-shrink:0;font-weight:600}
+.st-crit{background:#fce8e8;color:#842020}
+.st-imp{background:#fef3cd;color:#7a5c00}
+.st-std{background:#e8f3fb;color:#1a4a7a}
+.dd-sec-hd{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--gold);margin-bottom:8px;display:flex;align-items:center;gap:7px}
+.auc-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:13px;margin-bottom:9px;display:flex;gap:12px;align-items:flex-start;cursor:pointer;transition:all 0.18s;box-shadow:var(--shadow)}
+.auc-card:hover{border-color:var(--gold);box-shadow:0 4px 16px rgba(201,151,58,0.1)}
+.auc-logo{width:46px;height:46px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;flex-shrink:0;text-align:center;line-height:1.1}
+.auc-tag{font-size:9px;font-family:var(--mono);padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--surface)}
+.auc-visit{padding:7px 14px;background:var(--gold);color:var(--ink);border-radius:7px;font-size:11px;font-weight:700;text-decoration:none;flex-shrink:0;align-self:center;display:flex;align-items:center;gap:5px;transition:background 0.15s}
+.auc-visit:hover{background:var(--gold2)}
+.cnty-tbl{width:100%;border-collapse:collapse}
+.cnty-tbl th{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;padding:7px 11px;text-align:left;background:var(--surface);color:rgba(12,16,34,0.45);border-bottom:1px solid var(--border);font-weight:600}
+.cnty-tbl td{padding:7px 11px;border-bottom:1px solid var(--border);font-size:12px}
+.cnty-tbl tr:hover td{background:rgba(201,151,58,0.03)}
+.cnty-link{color:var(--blue);text-decoration:none;font-family:var(--mono);font-size:10px}
+.cnty-link:hover{text-decoration:underline}
+.st-count-btn{border:none;background:none;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px;padding:3px 10px;border-radius:5px;transition:background 0.12s}
+.st-count-btn:hover{background:rgba(201,151,58,0.12)}
+.state-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);margin-bottom:9px;overflow:hidden;box-shadow:var(--shadow)}
+.state-card-hd{display:flex;align-items:center;gap:12px;padding:12px 15px;cursor:pointer;transition:background 0.12s}
+.state-card-hd:hover{background:var(--surface)}
+.state-abbr{font-family:var(--mono);font-weight:700;font-size:13px;width:26px;flex-shrink:0}
+.state-name{font-size:13px;font-weight:600;flex:1;min-width:0}
+.state-counts{display:flex;gap:6px;flex-shrink:0}
+.sc-pill{font-size:9px;font-family:var(--mono);font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.sc-lien{background:#fef3cd;color:#7a5c00}
+.sc-deed{background:#d0f4fc;color:#0b5263}
+.sc-fore{background:#fce8e8;color:#7a1f1f}
+.state-card-body{padding:2px 15px 13px;border-top:1px solid var(--border)}
+.state-type-group{margin-top:11px}
+.state-type-hd{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:5px}
+.tl-lien{color:#a07000}.tl-deed{color:var(--blue)}.tl-fore{color:var(--red)}
+.state-prop-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border-radius:7px;margin-bottom:5px;cursor:pointer;transition:background 0.12s}
+.state-prop-row:hover{background:rgba(201,151,58,0.1)}
+.state-prop-addr{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.state-prop-meta{display:flex;gap:10px;font-size:11px;font-family:var(--mono);color:rgba(12,16,34,0.55);flex-shrink:0}
+.st-chip{padding:4px 10px;border-radius:5px;border:1px solid var(--border);font-size:11px;cursor:pointer;background:var(--card);font-family:var(--font);font-weight:500;transition:all 0.15s}
+.st-chip:hover,.st-chip.on{background:var(--gold);color:var(--ink);border-color:var(--gold)}
+.export-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.export-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;text-align:center;transition:all 0.18s;box-shadow:var(--shadow)}
+.export-card:hover{border-color:var(--gold);box-shadow:0 4px 16px rgba(201,151,58,0.1);transform:translateY(-1px)}
+.export-icon{font-size:30px;margin-bottom:10px}
+.export-title{font-size:14px;font-weight:700;margin-bottom:5px}
+.export-desc{font-size:11px;color:rgba(12,16,34,0.55);line-height:1.5;margin-bottom:14px}
+.modal-backdrop{position:fixed;inset:0;background:rgba(12,16,34,0.55);z-index:200;display:none;align-items:center;justify-content:center}
+.modal-backdrop.open{display:flex}
+.modal{background:var(--card);border-radius:14px;padding:22px;max-width:510px;width:95%;max-height:88vh;overflow-y:auto;border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,0.25)}
+.modal-hd{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:13px}
+.modal-title{font-size:16px;font-weight:700}
+.modal-close{width:29px;height:29px;border-radius:6px;border:1px solid var(--border);background:var(--surface);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:12px}
+.d-cell{padding:9px 11px;background:var(--surface);border-radius:8px}
+.d-lbl{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;color:rgba(12,16,34,0.4);font-weight:600;margin-bottom:2px}
+.d-val{font-size:13px;font-weight:600;font-family:var(--mono)}
+.snackbar{position:fixed;bottom:18px;right:18px;background:var(--ink);color:#fff;padding:10px 16px;border-radius:9px;font-size:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:300;display:none;align-items:center;gap:9px;border-left:3px solid var(--gold)}
+.snackbar.show{display:flex;animation:slideUp 0.25s ease}
+@keyframes slideUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{width:15px;height:15px;border:2px solid rgba(12,16,34,0.15);border-top-color:var(--ink);border-radius:50%;animation:spin 0.7s linear infinite;display:inline-block;flex-shrink:0}
+.divider{height:1px;background:var(--border);margin:10px 0}
+.ml-auto{margin-left:auto}
+</style>
+</head>
+<body>
+<div class="app">
+
+<div class="topbar">
+  <div>
+    <div class="logo">Tamb<em>.iQ</em></div>
+    <div class="logo-tag">PROPERTY INTELLIGENCE</div>
+  </div>
+  <div class="live-badge"><div class="live-dot"></div>ALL 50 STATES</div>
+  <div class="live-badge" style="background:rgba(107,63,160,0.2);border-color:rgba(107,63,160,0.35);color:#c084fc"><i class="fa fa-robot" style="font-size:9px"></i>&nbsp;AI POWERED</div>
+  <div class="tb-right">
+    <span style="color:rgba(255,255,255,0.35);font-size:11px"><i class="fa fa-building" style="margin-right:4px"></i>TambiQ Group LLC</span>
+    <button class="tb-btn" onclick="goPanel('export')"><i class="fa fa-download" style="margin-right:4px"></i>Export</button>
+    <div class="avatar">T</div>
+  </div>
+</div>
+
+<div class="body-row">
+
+<div class="sidebar">
+  <button class="navtab active" id="tab-search" onclick="goPanel('search')"><i class="fa fa-magnifying-glass"></i>Search</button>
+  <button class="navtab" id="tab-states" onclick="goPanel('states')"><i class="fa fa-flag-usa"></i>By State</button>
+  <button class="navtab" id="tab-map" onclick="goPanel('map')"><i class="fa fa-map-location-dot"></i>GPS Map</button>
+  <button class="navtab" id="tab-ai" onclick="goPanel('ai')"><i class="fa fa-robot"></i>AI Scorer</button>
+  <button class="navtab" id="tab-calc" onclick="goPanel('calc')"><i class="fa fa-calculator"></i>Deal Analyzer</button>
+  <button class="navtab" id="tab-portfolio" onclick="goPanel('portfolio')"><i class="fa fa-briefcase"></i>Portfolio<span class="badge-count" id="port-count" style="display:none">0</span></button>
+  <button class="navtab" id="tab-rehab" onclick="goPanel('rehab')"><i class="fa fa-helmet-safety"></i>Rehab Scope</button>
+  <button class="navtab" id="tab-dd" onclick="goPanel('dd')"><i class="fa fa-clipboard-check"></i>Due Diligence</button>
+  <button class="navtab" id="tab-auctions" onclick="goPanel('auctions')"><i class="fa fa-gavel"></i>Auctions</button>
+  <button class="navtab" id="tab-county" onclick="goPanel('county')"><i class="fa fa-landmark"></i>County Records</button>
+  <button class="navtab" id="tab-export" onclick="goPanel('export')"><i class="fa fa-file-export"></i>Export</button>
+</div>
+
+<div class="content-col">
+
+<div class="quickbar">
+  <button class="qf-btn qf-all active" id="qf-all" onclick="quickFilter('all',this)"><i class="fa fa-layer-group"></i>All Types</button>
+  <button class="qf-btn qf-lien" id="qf-lien" onclick="quickFilter('lien',this)"><i class="fa fa-file-invoice-dollar"></i>Tax Liens<span class="qf-count" id="qf-lien-count">0</span></button>
+  <button class="qf-btn qf-deed" id="qf-deed" onclick="quickFilter('deed',this)"><i class="fa fa-scroll"></i>Tax Deeds<span class="qf-count" id="qf-deed-count">0</span></button>
+  <button class="qf-btn qf-fore" id="qf-fore" onclick="quickFilter('fore',this)"><i class="fa fa-house-circle-exclamation"></i>Foreclosures<span class="qf-count" id="qf-fore-count">0</span></button>
+  <button class="qf-btn qf-watch" id="qf-watch" onclick="quickFilter('watch',this)"><i class="fa fa-bookmark"></i>Watchlist<span class="qf-count" id="qf-wl-count">0</span></button>
+</div>
+
+<div class="main">
+
+<!-- SEARCH -->
+<div class="panel active" id="panel-search">
+  <div class="stats-row">
+    <div class="stat"><div class="stat-lbl">Tax Liens</div><div class="stat-val" style="color:#a07000" id="stat-lien-count">0</div><div class="stat-sub">All 50 states</div></div>
+    <div class="stat"><div class="stat-lbl">Tax Deeds</div><div class="stat-val" style="color:var(--blue)" id="stat-deed-count">0</div><div class="stat-sub">All 50 states</div></div>
+    <div class="stat"><div class="stat-lbl">Foreclosures</div><div class="stat-val" style="color:var(--red)" id="stat-fore-count">0</div><div class="stat-sub">All 50 states</div></div>
+  </div>
+  <div class="search-bar">
+    <input class="search-input" id="s-query" placeholder="Search address, APN, county, ZIP, or owner name…" onkeydown="if(event.key==='Enter')doSearch()">
+    <select class="sel" id="s-type"><option value="all">All Types</option><option value="lien">Tax Lien</option><option value="deed">Tax Deed</option><option value="fore">Foreclosure</option></select>
+    <select class="sel" id="s-state"><option value="all">All States</option></select>
+    <button class="btn" onclick="doSearch()"><i class="fa fa-search"></i>Search</button>
+  </div>
+  <div class="filter-row">
+    <select class="sel" id="s-price"><option value="999999999">Any Price</option><option value="50000">≤ $50K</option><option value="100000">≤ $100K</option><option value="200000">≤ $200K</option><option value="500000">≤ $500K</option></select>
+    <select class="sel" id="s-beds"><option value="0">Any Beds</option><option value="2">2+ Beds</option><option value="3">3+ Beds</option><option value="4">4+ Beds</option></select>
+    <select class="sel" id="s-sort"><option value="new">Newest</option><option value="pa">Price ↑</option><option value="pd">Price ↓</option><option value="disc">Discount ↓</option></select>
+    <button class="btn btn-ghost btn-sm" onclick="toggleWLView()"><i class="fa fa-bookmark"></i><span id="wl-btn-lbl">Watchlist</span></button>
+  </div>
+  <div class="prop-grid" id="prop-grid"></div>
+</div>
+
+<!-- BY STATE -->
+<div class="panel" id="panel-states">
+  <div class="card" style="background:var(--ink2);color:#fff;padding:13px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
+    <i class="fa fa-flag-usa" style="font-size:20px;color:var(--gold2)"></i>
+    <div><div style="font-weight:700;font-size:14px">Listings by State</div><div style="font-size:11px;color:rgba(255,255,255,0.4)">Click a state to expand its tax lien, tax deed, and foreclosure listings</div></div>
+    <button class="btn btn-sm btn-ghost ml-auto" onclick="expandAllStates()"><i class="fa fa-angles-down"></i>Expand All</button>
+    <button class="btn btn-sm btn-ghost" onclick="collapseAllStates()"><i class="fa fa-angles-up"></i>Collapse All</button>
+  </div>
+  <div id="state-summary-body"></div>
+</div>
+
+<!-- MAP -->
+<div class="panel" id="panel-map" style="padding:14px">
+  <div class="map-layout">
+    <div class="map-side">
+      <div class="card" style="padding:11px;margin-bottom:9px">
+        <select class="sel" style="width:100%;margin-bottom:6px" id="m-type" onchange="renderMap()"><option value="all">All Types</option><option value="lien">Tax Lien</option><option value="deed">Tax Deed</option><option value="fore">Foreclosure</option></select>
+        <select class="sel" style="width:100%" id="m-state" onchange="renderMap()"><option value="all">All States</option></select>
+      </div>
+      <div id="map-list"></div>
+    </div>
+    <div class="map-area" id="map-area">
+      <div class="map-bg"></div>
+      <div class="map-grid-lines"></div>
+      <svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none">
+        <line x1="0" y1="45%" x2="100%" y2="45%" stroke="rgba(255,255,255,0.5)" stroke-width="2"/>
+        <line x1="0" y1="70%" x2="100%" y2="68%" stroke="rgba(255,255,255,0.35)" stroke-width="1.5"/>
+        <line x1="30%" y1="0" x2="28%" y2="100%" stroke="rgba(255,255,255,0.4)" stroke-width="2"/>
+        <line x1="65%" y1="0" x2="67%" y2="100%" stroke="rgba(255,255,255,0.35)" stroke-width="1.5"/>
+      </svg>
+      <div id="map-pins"></div>
+      <div class="map-legend">
+        <div class="leg-item"><div class="leg-dot" style="background:var(--gold)"></div><span>Tax Lien</span></div>
+        <div class="leg-item"><div class="leg-dot" style="background:#3baac0"></div><span>Tax Deed</span></div>
+        <div class="leg-item"><div class="leg-dot" style="background:#c03b3b"></div><span>Foreclosure</span></div>
+      </div>
+      <div class="map-ctrls">
+        <button class="map-ctrl" onclick="showSnack('Zoom in')"><i class="fa fa-plus"></i></button>
+        <button class="map-ctrl" onclick="showSnack('Zoom out')"><i class="fa fa-minus"></i></button>
+        <button class="map-ctrl" onclick="showSnack('My location')"><i class="fa fa-crosshairs"></i></button>
+        <button class="map-ctrl" onclick="showSnack('Satellite view')"><i class="fa fa-layer-group"></i></button>
+      </div>
+      <div id="map-tt" class="map-tt"></div>
+      <div style="position:absolute;top:12px;left:12px;background:rgba(255,255,255,0.92);padding:5px 10px;border-radius:7px;font-size:11px;border:1px solid var(--border)"><i class="fa fa-circle-info" style="color:var(--gold);margin-right:5px"></i>Hover to preview · Click pin = Google Maps · Sidebar = Detail</div>
+    </div>
+  </div>
+</div>
+
+<!-- AI SCORER -->
+<div class="panel" id="panel-ai">
+  <div class="ai-hero">
+    <div class="ai-hd">
+      <div class="ai-icon">🤖</div>
+      <div><div class="ai-title">Claude AI Deal Scorer</div><div class="ai-sub">Powered by Anthropic Claude · Deep investment intelligence for TambiQ Group LLC</div></div>
+      <div class="score-pill sc-A ml-auto" id="ai-cur-score" style="display:none">A+</div>
+    </div>
+    <div style="margin-bottom:12px">
+      <div class="c-lbl" style="color:rgba(255,255,255,0.4);margin-bottom:5px">Anthropic API Key</div>
+      <div class="api-key-bar">
+        <i class="fa fa-key" style="color:var(--gold2);font-size:14px;flex-shrink:0"></i>
+        <input class="api-key-inp" type="password" id="api-key-inp" placeholder="sk-ant-api03-…  (paste your Anthropic API key here)">
+        <button class="btn btn-sm" onclick="saveAPIKey()" style="flex-shrink:0"><i class="fa fa-check"></i>Save</button>
+      </div>
+      <div style="font-size:10px;color:rgba(255,255,255,0.3);margin-top:4px">Get your key at <a href="https://console.anthropic.com" target="_blank" style="color:var(--gold2)">console.anthropic.com</a> · Key is stored locally in your browser only</div>
+    </div>
+    <div class="c-lbl" style="color:rgba(255,255,255,0.4);margin-bottom:5px">Select Property to Analyze</div>
+    <select class="ai-prop-sel" id="ai-prop-sel"></select>
+    <div class="c-lbl" style="color:rgba(255,255,255,0.4);margin-bottom:8px">Analysis Modules</div>
+    <div class="ai-modules">
+      <div class="ai-mod on" onclick="toggleMod(this,'roi')"><i class="fa fa-chart-line"></i>Deal Profitability &amp; ROI<div class="chk"><i class="fa fa-check"></i></div></div>
+      <div class="ai-mod on" onclick="toggleMod(this,'risk')"><i class="fa fa-shield-halved"></i>Market Risk Assessment<div class="chk"><i class="fa fa-check"></i></div></div>
+      <div class="ai-mod on" onclick="toggleMod(this,'neighborhood')"><i class="fa fa-map-pin"></i>Neighborhood Analysis<div class="chk"><i class="fa fa-check"></i></div></div>
+      <div class="ai-mod on" onclick="toggleMod(this,'rehab')"><i class="fa fa-hammer"></i>Rehab Cost Validation<div class="chk"><i class="fa fa-check"></i></div></div>
+      <div class="ai-mod on" onclick="toggleMod(this,'diligence')"><i class="fa fa-clipboard-check"></i>Full Due Diligence Summary<div class="chk"><i class="fa fa-check"></i></div></div>
+      <div class="ai-mod on" onclick="toggleMod(this,'strategy')"><i class="fa fa-lightbulb"></i>Exit Strategy Advice<div class="chk"><i class="fa fa-check"></i></div></div>
+    </div>
+    <button class="ai-run" id="ai-run-btn" onclick="runAI()"><i class="fa fa-robot"></i>Run AI Analysis</button>
+    <div id="ai-result-area" style="display:none">
+      <div class="ai-metrics" id="ai-metrics"></div>
+      <div class="ai-result" id="ai-result-box"></div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">
+    <div class="card">
+      <div class="card-hd"><i class="fa fa-clock-rotate-left"></i>Recent AI Analyses</div>
+      <div id="ai-history-list"><div style="font-size:12px;color:rgba(12,16,34,0.4)">No analyses yet.</div></div>
+    </div>
+    <div class="card">
+      <div class="card-hd"><i class="fa fa-lightbulb"></i>TambiQ Strategy Tips</div>
+      <div style="font-size:12px;line-height:1.75;color:rgba(12,16,34,0.7)">
+        <p style="margin-bottom:8px">💰 <strong>Best Lien States:</strong> FL (18%), IL (36%), AZ (16%), IA (24%) for highest statutory interest rates.</p>
+        <p style="margin-bottom:8px">⚠️ <strong>IRS Federal Liens:</strong> Survive tax deed sales in most states — always order a federal lien search.</p>
+        <p style="margin-bottom:8px">📅 <strong>Redemption Periods:</strong> AL (3 yr), IA (2 yr), IL (2.5 yr) — factor full holding costs into your ROI.</p>
+        <p>📐 <strong>70% Rule MAO:</strong> (ARV × 0.70) − Estimated Rehab = Max Allowable Offer.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CALCULATOR -->
+<div class="panel" id="panel-calc">
+  <div class="calc-grid">
+    <div>
+      <div class="card">
+        <div class="card-hd"><i class="fa fa-home"></i>Property Details</div>
+        <div class="c-group"><div class="c-lbl">Purchase / Bid Price</div><input class="c-inp" type="number" id="c-purchase" value="85000" oninput="calcDeal()"></div>
+        <div class="c-group"><div class="c-lbl">After Repair Value (ARV)</div><input class="c-inp" type="number" id="c-arv" value="220000" oninput="calcDeal()"></div>
+        <div class="c-group"><div class="c-lbl">Rehab / Repair Cost</div><input class="c-inp" type="number" id="c-rehab" value="45000" oninput="calcDeal()"></div>
+        <div class="c-group"><div class="c-lbl">Closing Costs</div><input class="c-inp" type="number" id="c-closing" value="4500" oninput="calcDeal()"></div>
+      </div>
+      <div class="card">
+        <div class="card-hd"><i class="fa fa-chart-line"></i>Financing &amp; Hold</div>
+        <div class="c-group"><div class="c-lbl">Holding Costs ($/month)</div><input class="c-inp" type="number" id="c-hold" value="1200" oninput="calcDeal()"></div>
+        <div class="c-group"><div class="c-lbl">Hold Period (months)</div><input class="c-inp" type="number" id="c-months" value="6" oninput="calcDeal()"></div>
+        <div class="c-group"><div class="c-lbl">Hard Money Rate (%)</div><input class="c-inp" type="number" id="c-rate" value="8" oninput="calcDeal()"></div>
+        <div class="c-group"><div class="c-lbl">Loan Amount</div><input class="c-inp" type="number" id="c-loan" value="60000" oninput="calcDeal()"></div>
+      </div>
+      <div class="card">
+        <div class="card-hd"><i class="fa fa-sign-out-alt"></i>Exit Strategy</div>
+        <div class="c-group"><select class="sel" id="c-exit" style="width:100%;padding:8px 11px" onchange="calcDeal()"><option value="flip">Fix &amp; Flip</option><option value="rental">Buy &amp; Hold (Rental)</option><option value="wholesale">Wholesale</option></select></div>
+        <div id="rental-fields" style="display:none">
+          <div class="c-group"><div class="c-lbl">Monthly Rent</div><input class="c-inp" type="number" id="c-rent" value="1800" oninput="calcDeal()"></div>
+          <div class="c-group"><div class="c-lbl">Vacancy Rate (%)</div><input class="c-inp" type="number" id="c-vacancy" value="8" oninput="calcDeal()"></div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="results-panel">
+        <div class="results-hd">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:0.7px;color:rgba(255,255,255,0.35);margin-bottom:6px">Deal Score</div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <div class="score-pill sc-A" id="calc-score">A+</div>
+            <div><div style="font-size:20px;font-weight:700;color:#fff;font-family:var(--mono)" id="calc-profit">$0</div><div style="font-size:10px;color:rgba(255,255,255,0.35)">Net Profit</div></div>
+          </div>
+          <div class="gauge"><div class="gauge-fill" id="gauge" style="width:0%"></div></div>
+        </div>
+        <div style="padding:14px">
+          <div class="r-row"><span class="r-lbl">Total Investment</span><span class="r-val w" id="r-total">—</span></div>
+          <div class="r-row"><span class="r-lbl">Gross Profit</span><span class="r-val g" id="r-gross">—</span></div>
+          <div class="r-row"><span class="r-lbl">Net Profit</span><span class="r-val g" id="r-net">—</span></div>
+          <div class="r-row"><span class="r-lbl">ROI</span><span class="r-val a" id="r-roi">—</span></div>
+          <div class="r-row"><span class="r-lbl">Interest Cost</span><span class="r-val r" id="r-interest">—</span></div>
+          <div class="r-row"><span class="r-lbl">MAO (70% Rule)</span><span class="r-val a" id="r-mao">—</span></div>
+          <div class="r-row"><span class="r-lbl">Equity Created</span><span class="r-val g" id="r-equity">—</span></div>
+          <div class="r-row"><span class="r-lbl">Break-even Sale Price</span><span class="r-val w" id="r-be">—</span></div>
+          <div id="rental-results" style="display:none">
+            <div class="r-row"><span class="r-lbl">Monthly NOI</span><span class="r-val g" id="r-noi">—</span></div>
+            <div class="r-row"><span class="r-lbl">Cap Rate</span><span class="r-val a" id="r-cap">—</span></div>
+            <div class="r-row"><span class="r-lbl">Cash-on-Cash Return</span><span class="r-val g" id="r-coc">—</span></div>
+            <div class="r-row"><span class="r-lbl">Gross Rent Multiplier</span><span class="r-val w" id="r-grm">—</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:13px">
+        <div class="card-hd"><i class="fa fa-triangle-exclamation"></i>Risk Flags</div>
+        <div id="risk-flags"><div style="font-size:12px;color:rgba(12,16,34,0.4)">Enter values above to see risk assessment.</div></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn btn-sm" style="flex:1" onclick="sendToAI()"><i class="fa fa-robot"></i>AI Score Deal</button>
+          <button class="btn btn-sm btn-ghost" style="flex:1" onclick="addToPortfolio()"><i class="fa fa-plus"></i>Add to Portfolio</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PORTFOLIO -->
+<div class="panel" id="panel-portfolio">
+  <div class="port-summary" id="port-summary"></div>
+  <div class="port-tabs">
+    <button class="port-tab active" id="ptab-watch" onclick="setPortTab('watch',this)"><i class="fa fa-bookmark" style="margin-right:5px"></i>Watchlist</button>
+    <button class="port-tab" id="ptab-active" onclick="setPortTab('active',this)"><i class="fa fa-hammer" style="margin-right:5px"></i>Active Deals</button>
+    <button class="port-tab" id="ptab-closed" onclick="setPortTab('closed',this)"><i class="fa fa-check-circle" style="margin-right:5px"></i>Closed</button>
+    <button class="btn btn-sm ml-auto" onclick="exportPortExcel()"><i class="fa fa-file-excel"></i>Export Excel</button>
+  </div>
+  <div class="card">
+    <table class="port-tbl">
+      <thead><tr><th>Property</th><th>Type</th><th>State</th><th>Bid Price</th><th>ARV</th><th>Est. Profit</th><th>ROI</th><th>Status</th><th></th></tr></thead>
+      <tbody id="port-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- REHAB SCOPE -->
+<div class="panel" id="panel-rehab">
+  <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+    <input class="search-input" style="flex:1" placeholder="Property address for this scope…">
+    <button class="btn btn-sm" onclick="exportScopeExcel()"><i class="fa fa-file-excel"></i>Excel</button>
+    <button class="btn btn-sm btn-ghost" onclick="showSnack('Share link copied!')"><i class="fa fa-share-nodes"></i>Share</button>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 290px;gap:13px">
+    <div>
+      <div class="card">
+        <div class="card-hd"><i class="fa fa-list-check"></i>Scope of Work</div>
+        <table class="scope-tbl">
+          <thead><tr><th>Cat.</th><th>Description</th><th>Unit</th><th>Qty</th><th>Unit $</th><th>Total</th><th></th></tr></thead>
+          <tbody id="scope-body"></tbody>
+        </table>
+        <button class="add-line" onclick="addScopeRow()"><i class="fa fa-plus" style="margin-right:5px"></i>Add Line Item</button>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="card-hd"><i class="fa fa-chart-pie"></i>Cost Breakdown</div>
+        <div id="scope-breakdown"></div>
+        <div class="divider"></div>
+        <div class="scope-footer"><span style="font-size:12px;color:rgba(255,255,255,0.55)">Total Budget</span><span style="font-size:20px;font-weight:700;font-family:var(--mono);color:var(--gold2)" id="scope-total">$0</span></div>
+        <div style="margin-top:10px;padding:10px;background:rgba(201,151,58,0.08);border-radius:8px;border:1px solid rgba(201,151,58,0.2)">
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--gold);margin-bottom:3px">15% Contingency</div>
+          <div style="font-family:var(--mono);font-weight:600;font-size:15px" id="contingency">$0</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:11px">
+        <div class="card-hd"><i class="fa fa-hard-hat"></i>Contractor Notes</div>
+        <textarea style="width:100%;border:1.5px solid var(--border);border-radius:8px;padding:9px;font-family:var(--font);font-size:12px;height:85px;resize:vertical;outline:none" placeholder="Access info, special instructions, priority items…"></textarea>
+        <div style="margin-top:6px;font-size:11px;color:rgba(12,16,34,0.4)">Est. timeline: <strong id="timeline-est">—</strong></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DUE DILIGENCE -->
+<div class="panel" id="panel-dd">
+  <div class="dd-prog-wrap">
+    <div style="font-size:13px;font-weight:600;min-width:130px">Due Diligence</div>
+    <div class="dd-prog-bar"><div class="dd-prog-fill" id="dd-fill" style="width:0%"></div></div>
+    <div id="dd-pct" style="font-size:13px;font-family:var(--mono);font-weight:700;min-width:42px;text-align:right">0%</div>
+    <button class="btn btn-sm ml-auto" onclick="exportDDReport()"><i class="fa fa-file-alt"></i>Export</button>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:13px" id="dd-content"></div>
+</div>
+
+<!-- AUCTIONS -->
+<div class="panel" id="panel-auctions">
+  <div class="card" style="background:var(--ink2);color:#fff;padding:13px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px">
+    <i class="fa fa-gavel" style="font-size:20px;color:var(--gold2)"></i>
+    <div><div style="font-weight:700;font-size:14px">Live Auction Platforms</div><div style="font-size:11px;color:rgba(255,255,255,0.4)">Click any card to open the auction site directly</div></div>
+    <div class="live-badge ml-auto">8 PLATFORMS</div>
+  </div>
+  <div id="auction-list"></div>
+</div>
+
+<!-- COUNTY RECORDS -->
+<div class="panel" id="panel-county">
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-hd"><i class="fa fa-landmark"></i>County Treasurer &amp; Public Records — All 50 States</div>
+    <div style="font-size:12px;color:rgba(12,16,34,0.55);margin-bottom:10px">Direct links to treasurer, assessor, and tax collector websites. Click any URL to open.</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;row-gap:5px" id="state-chips"></div>
+  </div>
+  <div class="card">
+    <table class="cnty-tbl"><thead><tr><th>County</th><th>State</th><th>Treasurer / Tax Collector</th><th>Assessor</th><th>Sale Type</th><th>Rate / Notes</th></tr></thead>
+    <tbody id="county-body"></tbody></table>
+  </div>
+</div>
+
+<!-- EXPORT -->
+<div class="panel" id="panel-export">
+  <div class="card" style="background:var(--ink2);color:#fff;padding:14px 16px;margin-bottom:13px;display:flex;align-items:center;gap:14px">
+    <i class="fa fa-file-export" style="font-size:22px;color:var(--gold2)"></i>
+    <div><div style="font-weight:700;font-size:15px">Export &amp; Reports</div><div style="font-size:11px;color:rgba(255,255,255,0.4)">Download your data in professional formats</div></div>
+  </div>
+  <div class="export-grid">
+    <div class="export-card"><div class="export-icon">📊</div><div class="export-title">Portfolio Excel Report</div><div class="export-desc">Full portfolio with all properties, financials, ROI, and status tracking in a formatted Excel workbook.</div><button class="btn" onclick="exportPortExcel()"><i class="fa fa-file-excel"></i>Download .xlsx</button></div>
+    <div class="export-card"><div class="export-icon">🔨</div><div class="export-title">Rehab Scope Workbook</div><div class="export-desc">Contractor-ready scope with line items, unit costs, category totals, and 15% contingency.</div><button class="btn" onclick="exportScopeExcel()"><i class="fa fa-file-excel"></i>Download .xlsx</button></div>
+    <div class="export-card"><div class="export-icon">📋</div><div class="export-title">Due Diligence Report</div><div class="export-desc">Checklist with completed items, pending items, and priority flags with timestamp.</div><button class="btn" onclick="exportDDReport()"><i class="fa fa-file-alt"></i>Download .txt</button></div>
+    <div class="export-card"><div class="export-icon">🏘️</div><div class="export-title">Property Search Results</div><div class="export-desc">All search results with APN, county info, auction links, and financial data.</div><button class="btn" onclick="exportSearchExcel()"><i class="fa fa-file-excel"></i>Download .xlsx</button></div>
+    <div class="export-card"><div class="export-icon">🤖</div><div class="export-title">AI Analysis Report</div><div class="export-desc">All AI deal scoring analyses with scores, insights, and recommendations.</div><button class="btn" onclick="exportAIReport()"><i class="fa fa-file-alt"></i>Download .txt</button></div>
+    <div class="export-card"><div class="export-icon">🏦</div><div class="export-title">County Records CSV</div><div class="export-desc">All county treasurer and assessor URLs across all states in CSV format.</div><button class="btn" onclick="exportCountyCSV()"><i class="fa fa-file-csv"></i>Download .csv</button></div>
+  </div>
+</div>
+
+</div>
+</div>
+</div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-backdrop" id="modal-bg" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-hd">
+      <div><div class="modal-title" id="modal-title"></div><div style="font-size:10px;color:rgba(12,16,34,0.4);font-family:var(--mono);margin-top:2px" id="modal-sub"></div></div>
+      <button class="modal-close" onclick="closeModal()"><i class="fa fa-xmark"></i></button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<div class="snackbar" id="snack"><i class="fa fa-circle-check" style="color:var(--gold2)"></i><span id="snack-msg"></span></div>
+
+<script>
+const ALL_STATES=['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'];
+const CURATED_PROPERTIES=[
+  {id:1,addr:'2847 Palmetto Dr',city:'Tampa',state:'FL',county:'Hillsborough County',zip:'33610',type:'lien',price:18500,arv:185000,beds:3,baths:2,sqft:1450,lot:'6,200 sqft',yr:1978,apn:'U-12-29-19-4OL-00020',interest:18,auction:'RealAuction',aurl:'https://www.realauction.com',gis:'https://gis.hcpafl.org/propertysearch/',lat:70,lng:77,rehab:42000,notes:'Overgrown but structurally sound. Roof needs full replacement. Strong rental market area.'},
+  {id:2,addr:'412 N Orange Ave',city:'Orlando',state:'FL',county:'Orange County',zip:'32801',type:'deed',price:67000,arv:245000,beds:4,baths:2,sqft:1820,lot:'8,500 sqft',yr:1965,apn:'01-23-29-4818-00-010',auction:'Bid4Assets',aurl:'https://www.bid4assets.com',gis:'https://www.ocpafl.org/parcelsearch/',lat:67,lng:70,rehab:55000,notes:'Tax deed sale. Clear title after purchase. Growing neighborhood near downtown.'},
+  {id:3,addr:'9321 Westview Blvd',city:'Houston',state:'TX',county:'Harris County',zip:'77099',type:'fore',price:94000,arv:290000,beds:4,baths:3,sqft:2100,lot:'9,800 sqft',yr:1992,apn:'118-167-001-0017',auction:'Auction.com',aurl:'https://www.auction.com',gis:'https://public.hcad.org/records/',lat:52,lng:25,rehab:38000,notes:'Bank-owned REO. Interior access available with listing agent. Comparable sales strong.'},
+  {id:4,addr:'7701 MLK Jr Blvd',city:'Atlanta',state:'GA',county:'Fulton County',zip:'30314',type:'lien',price:8200,arv:165000,beds:3,baths:1,sqft:1200,lot:'5,400 sqft',yr:1955,apn:'14 016600030015',interest:20,auction:'GovEase',aurl:'https://www.govease.com',gis:'https://qpublic.schneidercorp.com/Application.aspx?AppID=1049&LayerID=21112&PageTypeID=4&PageID=9010',lat:60,lng:68,rehab:61000,notes:'High-interest lien. Georgia 1yr redemption period. Verify title thoroughly.'},
+  {id:5,addr:'1532 Desert Rose Ln',city:'Phoenix',state:'AZ',county:'Maricopa County',zip:'85034',type:'deed',price:52000,arv:310000,beds:3,baths:2,sqft:1680,lot:'7,200 sqft',yr:2001,apn:'111-23-456D',auction:'RealAuction',aurl:'https://www.realauction.com',gis:'https://mcassessor.maricopa.gov/mapping/',lat:47,lng:14,rehab:28000,notes:'Excellent condition. Primarily cosmetic work needed. Extremely hot Phoenix market.'},
+  {id:6,addr:'3308 Lakeside Ct',city:'Cleveland',state:'OH',county:'Cuyahoga County',zip:'44105',type:'fore',price:41000,arv:148000,beds:3,baths:1,sqft:1350,lot:'4,800 sqft',yr:1948,apn:'699-10-029',auction:'Auction.com',aurl:'https://www.auction.com',gis:'https://gis.cuyahogacounty.us/',lat:35,lng:70,rehab:52000,notes:'Pre-foreclosure. Owner still in contact. Possible short sale opportunity.'},
+  {id:7,addr:'8814 Prairie Wind Rd',city:'Chicago',state:'IL',county:'Cook County',zip:'60619',type:'lien',price:11200,arv:195000,beds:3,baths:2,sqft:1550,lot:'5,000 sqft',yr:1962,apn:'20-22-401-022-0000',interest:36,auction:'GovEase',aurl:'https://www.govease.com',gis:'https://maps.cookcountyil.gov/cookviewer/',lat:38,lng:63,rehab:47000,notes:'Illinois 36% statutory interest — highest in nation. 2.5yr redemption period.'},
+  {id:8,addr:'2241 Blue Ridge Dr',city:'Charlotte',state:'NC',county:'Mecklenburg County',zip:'28208',type:'deed',price:78000,arv:320000,beds:4,baths:3,sqft:2200,lot:'11,000 sqft',yr:1988,apn:'075-061-07',auction:'Bid4Assets',aurl:'https://www.bid4assets.com',gis:'https://polaris3g.mecklenburgcountync.gov/',lat:57,lng:68,rehab:44000,notes:'Up-and-coming neighborhood. Rising values. Minor rehab needed.'},
+  {id:9,addr:'447 Sunset Blvd',city:'Las Vegas',state:'NV',county:'Clark County',zip:'89101',type:'fore',price:135000,arv:485000,beds:5,baths:3,sqft:2800,lot:'8,400 sqft',yr:2005,apn:'162-03-210-001',auction:'Hubzu',aurl:'https://www.hubzu.com',gis:'https://gisgate.clarkcountynv.gov/',lat:47,lng:10,rehab:62000,notes:'Luxury foreclosure. Pool needs resurfacing. Very hot Las Vegas market.'},
+  {id:10,addr:'1102 Magnolia St',city:'Birmingham',state:'AL',county:'Jefferson County',zip:'35203',type:'lien',price:6800,arv:112000,beds:2,baths:1,sqft:980,lot:'4,200 sqft',yr:1940,apn:'29-00-2-003-030',interest:12,auction:'RealAuction',aurl:'https://www.realauction.com',gis:'https://www.jccal.org/gis-mapping',lat:59,lng:62,rehab:38000,notes:'Alabama 3yr redemption. Low entry point. Verify structural integrity first.'},
+];
+const STATE_NAMES={AL:'Alabama',AK:'Alaska',AZ:'Arizona',AR:'Arkansas',CA:'California',CO:'Colorado',CT:'Connecticut',DE:'Delaware',FL:'Florida',GA:'Georgia',HI:'Hawaii',ID:'Idaho',IL:'Illinois',IN:'Indiana',IA:'Iowa',KS:'Kansas',KY:'Kentucky',LA:'Louisiana',ME:'Maine',MD:'Maryland',MA:'Massachusetts',MI:'Michigan',MN:'Minnesota',MS:'Mississippi',MO:'Missouri',MT:'Montana',NE:'Nebraska',NV:'Nevada',NH:'New Hampshire',NJ:'New Jersey',NM:'New Mexico',NY:'New York',NC:'North Carolina',ND:'North Dakota',OH:'Ohio',OK:'Oklahoma',OR:'Oregon',PA:'Pennsylvania',RI:'Rhode Island',SC:'South Carolina',SD:'South Dakota',TN:'Tennessee',TX:'Texas',UT:'Utah',VT:'Vermont',VA:'Virginia',WA:'Washington',WV:'West Virginia',WI:'Wisconsin',WY:'Wyoming'};
+const STATE_META=[
+  {st:'AL',county:'Jefferson County',city:'Birmingham',zip:'35203',lat:59,lng:62},
+  {st:'AK',county:'Anchorage Borough',city:'Anchorage',zip:'99501',lat:8,lng:8},
+  {st:'AZ',county:'Maricopa County',city:'Phoenix',zip:'85034',lat:47,lng:14},
+  {st:'AR',county:'Pulaski County',city:'Little Rock',zip:'72201',lat:55,lng:48},
+  {st:'CA',county:'Los Angeles County',city:'Los Angeles',zip:'90012',lat:52,lng:5},
+  {st:'CO',county:'Denver County',city:'Denver',zip:'80202',lat:40,lng:32},
+  {st:'CT',county:'Hartford County',city:'Hartford',zip:'06103',lat:22,lng:88},
+  {st:'DE',county:'New Castle County',city:'Wilmington',zip:'19801',lat:35,lng:82},
+  {st:'FL',county:'Hillsborough County',city:'Tampa',zip:'33610',lat:70,lng:77},
+  {st:'GA',county:'Fulton County',city:'Atlanta',zip:'30314',lat:60,lng:68},
+  {st:'HI',county:'Honolulu County',city:'Honolulu',zip:'96813',lat:78,lng:2},
+  {st:'ID',county:'Ada County',city:'Boise',zip:'83702',lat:20,lng:14},
+  {st:'IL',county:'Cook County',city:'Chicago',zip:'60619',lat:38,lng:63},
+  {st:'IN',county:'Marion County',city:'Indianapolis',zip:'46204',lat:38,lng:66},
+  {st:'IA',county:'Polk County',city:'Des Moines',zip:'50309',lat:32,lng:52},
+  {st:'KS',county:'Sedgwick County',city:'Wichita',zip:'67202',lat:44,lng:44},
+  {st:'KY',county:'Jefferson County',city:'Louisville',zip:'40202',lat:47,lng:68},
+  {st:'LA',county:'Orleans Parish',city:'New Orleans',zip:'70112',lat:66,lng:52},
+  {st:'ME',county:'Cumberland County',city:'Portland',zip:'04101',lat:10,lng:90},
+  {st:'MD',county:'Baltimore County',city:'Towson',zip:'21204',lat:36,lng:80},
+  {st:'MA',county:'Suffolk County',city:'Boston',zip:'02108',lat:18,lng:92},
+  {st:'MI',county:'Wayne County',city:'Detroit',zip:'48226',lat:28,lng:68},
+  {st:'MN',county:'Hennepin County',city:'Minneapolis',zip:'55401',lat:20,lng:52},
+  {st:'MS',county:'Hinds County',city:'Jackson',zip:'39201',lat:63,lng:56},
+  {st:'MO',county:'Jackson County',city:'Kansas City',zip:'64106',lat:42,lng:48},
+  {st:'MT',county:'Yellowstone County',city:'Billings',zip:'59101',lat:10,lng:30},
+  {st:'NE',county:'Douglas County',city:'Omaha',zip:'68102',lat:32,lng:42},
+  {st:'NV',county:'Clark County',city:'Las Vegas',zip:'89101',lat:47,lng:10},
+  {st:'NH',county:'Hillsborough County',city:'Manchester',zip:'03101',lat:14,lng:90},
+  {st:'NJ',county:'Essex County',city:'Newark',zip:'07102',lat:28,lng:85},
+  {st:'NM',county:'Bernalillo County',city:'Albuquerque',zip:'87102',lat:52,lng:26},
+  {st:'NY',county:'New York County',city:'New York',zip:'10007',lat:22,lng:88},
+  {st:'NC',county:'Mecklenburg County',city:'Charlotte',zip:'28208',lat:57,lng:68},
+  {st:'ND',county:'Cass County',city:'Fargo',zip:'58102',lat:8,lng:44},
+  {st:'OH',county:'Cuyahoga County',city:'Cleveland',zip:'44105',lat:35,lng:70},
+  {st:'OK',county:'Oklahoma County',city:'Oklahoma City',zip:'73102',lat:52,lng:44},
+  {st:'OR',county:'Multnomah County',city:'Portland',zip:'97201',lat:12,lng:8},
+  {st:'PA',county:'Philadelphia County',city:'Philadelphia',zip:'19107',lat:30,lng:83},
+  {st:'RI',county:'Providence County',city:'Providence',zip:'02903',lat:20,lng:91},
+  {st:'SC',county:'Richland County',city:'Columbia',zip:'29201',lat:62,lng:73},
+  {st:'SD',county:'Minnehaha County',city:'Sioux Falls',zip:'57104',lat:16,lng:42},
+  {st:'TN',county:'Davidson County',city:'Nashville',zip:'37201',lat:50,lng:60},
+  {st:'TX',county:'Harris County',city:'Houston',zip:'77099',lat:52,lng:25},
+  {st:'UT',county:'Salt Lake County',city:'Salt Lake City',zip:'84111',lat:28,lng:20},
+  {st:'VT',county:'Chittenden County',city:'Burlington',zip:'05401',lat:12,lng:86},
+  {st:'VA',county:'Fairfax County',city:'Fairfax',zip:'22030',lat:36,lng:78},
+  {st:'WA',county:'King County',city:'Seattle',zip:'98104',lat:6,lng:8},
+  {st:'WV',county:'Kanawha County',city:'Charleston',zip:'25301',lat:36,lng:74},
+  {st:'WI',county:'Milwaukee County',city:'Milwaukee',zip:'53202',lat:24,lng:60},
+  {st:'WY',county:'Laramie County',city:'Cheyenne',zip:'82001',lat:22,lng:34},
+];
+const STREET_NAMES=['Maple St','Oak Ave','Cedar Ln','Pine Rd','Elm St','Birch Ct','Willow Dr','Magnolia Ave','Sunset Blvd','Highland Dr','Riverside Dr','Park Ave','Lincoln St','Franklin Ave','Jefferson Rd','Washington Blvd','Hickory Ln','Chestnut St','Walnut Ave','Sycamore Dr'];
+const AUCTION_URL={GovEase:'https://www.govease.com',RealAuction:'https://www.realauction.com','Bid4Assets':'https://www.bid4assets.com','Auction.com':'https://www.auction.com',Hubzu:'https://www.hubzu.com'};
+const AUCTION_BY_TYPE={lien:['GovEase','RealAuction'],deed:['RealAuction','Bid4Assets'],fore:['Auction.com','Hubzu']};
+const TYPE_NOTES={
+  lien:'County tax lien certificate. Verify the statutory interest rate and redemption period with the county treasurer before bidding.',
+  deed:'Tax deed sale property. Confirm clear title, order a full title search, and check for surviving liens before bidding.',
+  fore:'Bank-owned or pre-foreclosure listing. Verify occupancy status and schedule an inspection before making an offer.'
+};
+function seededRand(seed){const x=Math.sin(seed)*10000;return x-Math.floor(x);}
+const COVERED_COMBOS=new Set(['FL-lien','FL-deed','TX-fore','GA-lien','AZ-deed','OH-fore','IL-lien','NC-deed','NV-fore','AL-lien']);
+function generateNationalProperties(startId){
+  const list=[];let id=startId;
+  STATE_META.forEach((m,si)=>{
+    ['lien','deed','fore'].forEach((type,ti)=>{
+      if(COVERED_COMBOS.has(m.st+'-'+type))return;
+      const seed=si*17+ti*31+7;
+      const r1=seededRand(seed),r2=seededRand(seed+1),r3=seededRand(seed+2),r4=seededRand(seed+3),r5=seededRand(seed+4);
+      const streetNum=100+Math.floor(r1*9800);
+      const street=STREET_NAMES[(si*3+ti)%STREET_NAMES.length];
+      const basePrice=type==='lien'?6000+Math.floor(r2*25000):type==='deed'?45000+Math.floor(r2*95000):60000+Math.floor(r2*145000);
+      const arv=Math.round(basePrice*(2.1+r3*1.7));
+      const rehab=Math.round(arv*(0.12+r4*0.24));
+      const beds=2+Math.floor(r1*4);
+      const baths=1+Math.floor(r2*3);
+      const sqft=900+Math.floor(r3*1900);
+      const yr=1935+Math.floor(r4*85);
+      const auctionOpts=AUCTION_BY_TYPE[type];
+      const auction=auctionOpts[(si+ti)%auctionOpts.length];
+      const gis='https://www.google.com/search?q='+encodeURIComponent(m.county+' '+m.st+' GIS parcel map');
+      const prop={
+        id:id++,addr:streetNum+' '+street,city:m.city,state:m.st,county:m.county,zip:m.zip,
+        type,price:basePrice,arv,beds,baths,sqft,lot:(3+Math.floor(r5*9))+',000 sqft',yr,
+        apn:m.st+'-'+(10+si)+'-'+(100+ti)+'-'+(1000+Math.floor(r2*8999)),
+        auction,aurl:AUCTION_URL[auction],gis,
+        lat:Math.max(2,Math.min(96,m.lat+(ti-1)*4)),lng:Math.max(2,Math.min(96,m.lng+(ti-1)*4)),
+        rehab,notes:TYPE_NOTES[type]
+      };
+      if(type==='lien')prop.interest=8+Math.floor(r1*28);
+      list.push(prop);
+    });
+  });
+  return list;
+}
+const PROPERTIES=[...CURATED_PROPERTIES,...generateNationalProperties(11)];
+const AUCTIONS=[
+  {name:'RealAuction',logo:'RA',lc:'#1653a0',lb:'#dce8fb',desc:'Official government tax deed & tax lien auction platform. Serves 100+ counties nationwide.',tags:['Tax Deeds','Tax Liens','Government','Live+Online'],url:'https://www.realauction.com',props:312,states:22},
+  {name:'Bid4Assets',logo:'B4A',lc:'#157a4e',lb:'#d0f4e8',desc:'Marketplace for foreclosure, bankruptcy, and government property auctions. REO and sheriff sales.',tags:['Foreclosure','REO','Sheriff Sales'],url:'https://www.bid4assets.com',props:847,states:50},
+  {name:'Auction.com',logo:'A.C',lc:'#b83232',lb:'#fce8e8',desc:'Largest online real estate auction platform. Bank-owned, foreclosure, and short sales.',tags:['Bank-Owned','REO','Short Sales'],url:'https://www.auction.com',props:2413,states:50},
+  {name:'GovEase',logo:'GE',lc:'#7a5c00',lb:'#fef3cd',desc:'Specialized in county tax lien and tax deed sales with real-time county integration.',tags:['Tax Liens','Tax Deeds','County'],url:'https://www.govease.com',props:621,states:18},
+  {name:'Hubzu',logo:'HZ',lc:'#18213a',lb:'#e8eaf6',desc:'Online marketplace with bank-owned properties, short sales, and traditional auctions.',tags:['Bank-Owned','Short Sales'],url:'https://www.hubzu.com',props:1204,states:50},
+  {name:'Foreclosure.com',logo:'FC',lc:'#842020',lb:'#fce8e8',desc:'Pre-foreclosure and foreclosure database with early-access alerts and owner contact info.',tags:['Pre-Foreclosure','Alerts'],url:'https://www.foreclosure.com',props:4210,states:50},
+  {name:'Ten-X',logo:'10X',lc:'#7a4000',lb:'#fff0e0',desc:'Commercial real estate online auction with institutional-grade listings and due diligence tools.',tags:['Commercial','Institutional'],url:'https://www.ten-x.com',props:503,states:50},
+  {name:'Williams & Williams',logo:'WW',lc:'#3a1870',lb:'#ede8f5',desc:'National auction company offering live and online auctions for residential and commercial properties.',tags:['Residential','Commercial','Live'],url:'https://www.williamsauction.com',props:289,states:40},
+];
+const COUNTIES={
+  FL:[{county:'Hillsborough',tr:'hillstax.org',assr:'hcpafl.org',type:'Tax Deed',rate:'18% annual interest'},{county:'Orange',tr:'octaxcol.com',assr:'ocpafl.org',type:'Tax Deed',rate:'18% annual interest'},{county:'Miami-Dade',tr:'miamidade.gov/taxcollector',assr:'miamidade.gov/pa',type:'Tax Deed',rate:'18% annual interest'},{county:'Broward',tr:'broward.org/taxcollector',assr:'bcpa.net',type:'Tax Deed',rate:'18% annual interest'},{county:'Palm Beach',tr:'pbctax.com',assr:'pbcgov.com/papa',type:'Tax Deed',rate:'18% annual interest'}],
+  TX:[{county:'Harris',tr:'hctax.net',assr:'hcad.org',type:'Tax Deed',rate:'25% penalty'},{county:'Dallas',tr:'dallascounty.org/taxoffice',assr:'dallascad.org',type:'Tax Deed',rate:'25% penalty'},{county:'Travis',tr:'traviscountytx.gov/tax-office',assr:'traviscad.org',type:'Tax Deed',rate:'25% penalty'},{county:'Tarrant',tr:'tarrantcounty.com/tax',assr:'tad.org',type:'Tax Deed',rate:'25% penalty'}],
+  GA:[{county:'Fulton',tr:'fultoncountyga.gov/tax',assr:'fultonassessor.org',type:'Tax Deed (Fi.Fa)',rate:'20% premium'},{county:'DeKalb',tr:'dekalbcountyga.gov/tax',assr:'dekalbpa.com',type:'Tax Deed (Fi.Fa)',rate:'20% premium'},{county:'Gwinnett',tr:'gwinnettcounty.com/taxcommissioner',assr:'gwinnetttaxcommissioner.com',type:'Tax Deed (Fi.Fa)',rate:'20% premium'}],
+  AZ:[{county:'Maricopa',tr:'treasurer.maricopa.gov',assr:'assessor.maricopa.gov',type:'Tax Lien Certificate',rate:'16% max'},{county:'Pima',tr:'pima.gov/treasurer',assr:'assessor.pima.gov',type:'Tax Lien Certificate',rate:'16% max'},{county:'Yavapai',tr:'yavapai.us/treasurer',assr:'yavapai.us/assessor',type:'Tax Lien Certificate',rate:'16% max'}],
+  OH:[{county:'Cuyahoga',tr:'treasurer.cuyahogacounty.us',assr:'fiscalofficer.cuyahogacounty.us',type:'Tax Lien',rate:'18% interest'},{county:'Franklin',tr:'treasurer.franklincountyohio.gov',assr:'property.franklincountyohio.gov',type:'Tax Lien',rate:'18% interest'}],
+  IL:[{county:'Cook',tr:'cookcountytreasurer.com',assr:'cookcountyassessor.com',type:'Tax Lien',rate:'36% statutory max'},{county:'DuPage',tr:'dupagetreasurer.com',assr:'dupageassessor.com',type:'Tax Lien',rate:'36% statutory max'}],
+  NC:[{county:'Mecklenburg',tr:'mecknc.gov/taxes',assr:'mecknc.gov/luesa/assessorsoffice',type:'Tax Deed',rate:'Varies'},{county:'Wake',tr:'wakegov.com/tax',assr:'wakegov.com/tax/assessments',type:'Tax Deed',rate:'Varies'}],
+  NV:[{county:'Clark',tr:'clarkcountynv.gov/treasurer',assr:'clarkcountynv.gov/assessor',type:'Tax Deed',rate:'10% interest'},{county:'Washoe',tr:'washoecounty.gov/treasurer',assr:'washoecounty.gov/assessor',type:'Tax Deed',rate:'10% interest'}],
+  CA:[{county:'Los Angeles',tr:'ttc.lacounty.gov',assr:'assessor.lacounty.gov',type:'Tax Deed',rate:'18% interest'},{county:'San Diego',tr:'sdttc.com',assr:'sdarcc.sdcounty.ca.gov',type:'Tax Deed',rate:'18% interest'}],
+  NY:[{county:'Nassau',tr:'nassaucountyny.gov/departments/treasurer',assr:'nassaucountyny.gov/departments/assessment',type:'Tax Lien',rate:'Varies'},{county:'Suffolk',tr:'suffolkcountyny.gov/comptroller',assr:'suffolkcountyny.gov/realpropertyservice',type:'Tax Lien',rate:'Varies'}],
+  AL:[{county:'Jefferson',tr:'jeffconline.jccal.org/taxes',assr:'jeffconline.jccal.org/realestate',type:'Tax Lien',rate:'12% + 3yr redemption'}],
+  PA:[{county:'Philadelphia',tr:'phila.gov/departments/revenue',assr:'opa.phila.gov',type:'Tax Deed',rate:'9% interest'}],
+};
+const DD_SECTIONS=[
+  {title:'Title & Ownership',icon:'fa-file-certificate',items:[{t:'Order title search / commitment',n:'Identify all liens, encumbrances, clouds on title',s:'critical'},{t:'Verify owner of record matches seller',n:'Cross-reference county deed records',s:'critical'},{t:'Check IRS / federal tax liens',n:'Survive tax deed sales in most states — use PACER',s:'critical'},{t:'Verify HOA status and outstanding dues',n:'Contact HOA management directly',s:'important'},{t:'Check for mechanics liens',n:'Filed by contractors against prior owner',s:'important'},{t:'Confirm legal description matches survey',n:'',s:'standard'}]},
+  {title:'Tax & Financial Records',icon:'fa-receipt',items:[{t:'Pull all outstanding tax balances',n:'County treasurer website',s:'critical'},{t:'Verify lien amount and statutory interest rate',n:'Confirm rate with county directly',s:'critical'},{t:'Check redemption period and deadline',n:'State-specific — critical for timing',s:'critical'},{t:'Identify municipal utility liens',n:'Water, sewer, trash',s:'important'},{t:'Research code enforcement liens',n:'City/county violation records',s:'important'},{t:'Check prior year delinquency pattern',n:'Indicates serial non-payment risk',s:'standard'}]},
+  {title:'Property Condition',icon:'fa-house-crack',items:[{t:'Drive-by exterior inspection',n:'Document condition, occupancy, access',s:'important'},{t:'Order professional home inspection',n:'ASHI or InterNACHI certified',s:'important'},{t:'Pull permit history',n:'Unpermitted work creates liability',s:'important'},{t:'Verify FEMA flood zone status',n:'Check msc.fema.gov',s:'important'},{t:'Confirm zoning classification',n:'Ensure intended use is permitted',s:'standard'},{t:'Assess environmental concerns',n:'UST, wetlands, contamination',s:'standard'}]},
+  {title:'Market & Valuation',icon:'fa-chart-bar',items:[{t:'Pull 3+ comparable sales (comps)',n:'Last 6 months, within 0.5 mi radius',s:'critical'},{t:'Establish ARV with adjusted comps',n:'Adjust for sqft, condition, beds',s:'critical'},{t:'Check days-on-market trend',n:'Rising DOM = softening market',s:'important'},{t:'Research rental comps',n:'If buy-and-hold strategy',s:'standard'},{t:'Evaluate neighborhood trajectory',n:'Up, flat, or declining',s:'standard'}]},
+];
+const SCOPE_DEFAULTS=[
+  {cat:'Structural',cc:'c-str',desc:'Foundation repair / crack injection',unit:'LS',qty:1,cost:3500},
+  {cat:'Structural',cc:'c-str',desc:'Roof replacement (shingles, 20 sq)',unit:'SQ',qty:20,cost:450},
+  {cat:'Mechanical',cc:'c-mec',desc:'HVAC system replacement',unit:'EA',qty:1,cost:6500},
+  {cat:'Mechanical',cc:'c-mec',desc:'Electrical panel upgrade (200A)',unit:'EA',qty:1,cost:2800},
+  {cat:'Mechanical',cc:'c-mec',desc:'Plumbing repipe (copper/PEX)',unit:'LS',qty:1,cost:4200},
+  {cat:'Cosmetic',cc:'c-cos',desc:'Interior paint (all rooms)',unit:'RM',qty:8,cost:350},
+  {cat:'Cosmetic',cc:'c-cos',desc:'LVP flooring installation',unit:'SF',qty:1200,cost:4.5},
+  {cat:'Cosmetic',cc:'c-cos',desc:'Kitchen cabinet & countertop reno',unit:'LS',qty:1,cost:8500},
+  {cat:'Cosmetic',cc:'c-cos',desc:'Bathroom full renovation',unit:'EA',qty:2,cost:5500},
+  {cat:'Exterior',cc:'c-ext',desc:'Exterior paint / pressure wash',unit:'LS',qty:1,cost:2400},
+  {cat:'Exterior',cc:'c-ext',desc:'Landscaping & curb appeal',unit:'LS',qty:1,cost:1800},
+  {cat:'Exterior',cc:'c-ext',desc:'Driveway resurfacing',unit:'SF',qty:600,cost:3.5},
+];
+
+let watchlist=new Set(),portfolio=[];
+let scopeRows=SCOPE_DEFAULTS.map((r,i)=>({...r,id:i}));
+let nextScopeId=SCOPE_DEFAULTS.length;
+let ddState={},aiHistory=[];
+let activeMods=new Set(['roi','risk','neighborhood','rehab','diligence','strategy']);
+let showWL=false,portTab='watch',activeCountyState='FL';
+let calcCache={},snackTimer,apiKey='';
+
+function goPanel(id){
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.navtab').forEach(t=>t.classList.remove('active'));
+  const p=document.getElementById('panel-'+id);
+  const t=document.getElementById('tab-'+id);
+  if(p)p.classList.add('active');
+  if(t)t.classList.add('active');
+  if(id==='map')setTimeout(renderMap,50);
+  if(id==='portfolio')renderPortfolio();
+  if(id==='states')renderStateSummary();
+}
+
+function filterByState(state,type){
+  document.getElementById('s-state').value=state;
+  document.getElementById('s-type').value=type||'all';
+  showWL=false;
+  document.getElementById('wl-btn-lbl').textContent='Watchlist';
+  document.querySelectorAll('.qf-btn').forEach(b=>b.classList.remove('active'));
+  const qfEl=document.getElementById(type?'qf-'+type:'qf-all');
+  if(qfEl)qfEl.classList.add('active');
+  goPanel('search');
+  doSearch();
+}
+
+let expandedStates=new Set();
+function toggleStateCard(state){
+  if(expandedStates.has(state))expandedStates.delete(state);
+  else expandedStates.add(state);
+  renderStateSummary();
+}
+function expandAllStates(){ALL_STATES.forEach(s=>expandedStates.add(s));renderStateSummary();}
+function collapseAllStates(){expandedStates.clear();renderStateSummary();}
+
+function renderStateSummary(){
+  const byState={};
+  ALL_STATES.forEach(s=>byState[s]={lien:[],deed:[],fore:[]});
+  PROPERTIES.forEach(p=>{if(byState[p.state])byState[p.state][p.type].push(p);});
+  const typeGroup=(g,type,label,cls)=>!g[type].length?'':`
+    <div class="state-type-group">
+      <div class="state-type-hd ${cls}">${label} (${g[type].length})</div>
+      ${g[type].map(p=>{
+        const disc=Math.round((1-p.price/p.arv)*100);
+        return `<div class="state-prop-row" onclick="openModal(${p.id})">
+          <div class="state-prop-addr">${p.addr}, ${p.city}</div>
+          <div class="state-prop-meta"><span>$${p.price.toLocaleString()}</span><span>ARV $${p.arv.toLocaleString()}</span><span>${disc}% off</span></div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  document.getElementById('state-summary-body').innerHTML=ALL_STATES.map(s=>{
+    const g=byState[s];
+    const isOpen=expandedStates.has(s);
+    return `<div class="state-card">
+      <div class="state-card-hd" onclick="toggleStateCard('${s}')">
+        <span class="state-abbr">${s}</span>
+        <span class="state-name">${STATE_NAMES[s]||s}</span>
+        <span class="state-counts">
+          <span class="sc-pill sc-lien">${g.lien.length} Lien</span>
+          <span class="sc-pill sc-deed">${g.deed.length} Deed</span>
+          <span class="sc-pill sc-fore">${g.fore.length} Fore</span>
+        </span>
+        <i class="fa fa-chevron-${isOpen?'up':'down'}"></i>
+      </div>
+      ${isOpen?`<div class="state-card-body">
+        ${typeGroup(g,'lien','TAX LIENS','tl-lien')}
+        ${typeGroup(g,'deed','TAX DEEDS','tl-deed')}
+        ${typeGroup(g,'fore','FORECLOSURES','tl-fore')}
+      </div>`:''}
+    </div>`;
+  }).join('');
+}
+
+function quickFilter(type,btn){
+  document.querySelectorAll('.qf-btn').forEach(b=>b.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+  goPanel('search');
+  if(type==='watch'){
+    showWL=true;
+    document.getElementById('s-type').value='all';
+  }else{
+    showWL=false;
+    document.getElementById('s-type').value=type;
+  }
+  document.getElementById('wl-btn-lbl').textContent=showWL?'All Props':'Watchlist';
+  doSearch();
+}
+
+function initDropdowns(){
+  ['s-state','m-state'].forEach(id=>{
+    const el=document.getElementById(id);
+    ALL_STATES.forEach(s=>{el.innerHTML+=`<option value="${s}">${s}</option>`;});
+  });
+  const aiSel=document.getElementById('ai-prop-sel');
+  PROPERTIES.forEach(p=>{aiSel.innerHTML+=`<option value="${p.id}">${p.addr}, ${p.city} ${p.state}</option>`;});
+  const saved=localStorage.getItem('tambiq_api_key');
+  if(saved){apiKey=saved;document.getElementById('api-key-inp').value=saved;showSnack('API key loaded');}
+}
+
+function saveAPIKey(){
+  apiKey=document.getElementById('api-key-inp').value.trim();
+  if(apiKey){localStorage.setItem('tambiq_api_key',apiKey);showSnack('API key saved!');}
+  else{showSnack('Please enter a valid API key');}
+}
+
+function renderProps(list){
+  document.getElementById('prop-grid').innerHTML=list.map(p=>{
+    const disc=Math.round((1-p.price/p.arv)*100);
+    const isSaved=watchlist.has(p.id);
+    return `<div class="prop-card" onclick="openModal(${p.id})">
+      <div class="prop-img"><i class="fa fa-house"></i></div>
+      <div class="prop-badges">
+        ${p.type==='lien'?'<span class="bdg bdg-lien">TAX LIEN</span>':''}
+        ${p.type==='deed'?'<span class="bdg bdg-deed">TAX DEED</span>':''}
+        ${p.type==='fore'?'<span class="bdg bdg-fore">FORECLOSURE</span>':''}
+        <span class="bdg bdg-auction"><i class="fa fa-gavel" style="font-size:8px"></i> ${p.auction}</span>
+        ${isSaved?'<span class="bdg bdg-saved"><i class="fa fa-bookmark" style="font-size:8px"></i> Saved</span>':''}
+      </div>
+      <div class="prop-body">
+        <div class="prop-addr">${p.addr}</div>
+        <div class="prop-cnty">${p.county} · ${p.state} ${p.zip}</div>
+        <div class="prop-meta">
+          <div><div class="prop-price">$${p.price.toLocaleString()}</div><div class="prop-arv">ARV $${p.arv.toLocaleString()} · ${disc}% off</div></div>
+          <div style="text-align:right;font-size:10px;color:rgba(12,16,34,0.45)"><div>${p.beds}bd/${p.baths}ba</div><div>${p.sqft.toLocaleString()} sqft</div></div>
+        </div>
+      </div>
+      <div class="prop-actions">
+        <button class="act-btn ${isSaved?'saved':''}" onclick="event.stopPropagation();toggleWL(${p.id})"><i class="fa fa-${isSaved?'check':'bookmark'}"></i> ${isSaved?'Saved':'Save'}</button>
+        <button class="act-btn" onclick="event.stopPropagation();loadCalc(${p.id})"><i class="fa fa-calculator"></i> Analyze</button>
+        <button class="act-btn" onclick="event.stopPropagation();openMaps(${p.id})" style="color:var(--green)"><i class="fa fa-map-location-dot"></i> Maps</button>
+        <button class="act-btn" onclick="event.stopPropagation();openGIS(${p.id})" title="${p.county} GIS Parcel Map" style="flex:0 0 34px;color:var(--purple)"><i class="fa fa-layer-group"></i></button>
+        <button class="act-btn primary" onclick="event.stopPropagation();openAuction('${p.aurl}','${p.auction}')"><i class="fa fa-gavel"></i> Auction</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function doSearch(){
+  let list=[...PROPERTIES];
+  const q=document.getElementById('s-query').value.toLowerCase();
+  const type=document.getElementById('s-type').value;
+  const state=document.getElementById('s-state').value;
+  const maxP=+document.getElementById('s-price').value||999999999;
+  const minB=+document.getElementById('s-beds').value||0;
+  const sort=document.getElementById('s-sort').value;
+  if(showWL)list=list.filter(p=>watchlist.has(p.id));
+  if(q)list=list.filter(p=>p.addr.toLowerCase().includes(q)||p.county.toLowerCase().includes(q)||p.state.toLowerCase().includes(q)||p.zip.includes(q));
+  if(type!=='all')list=list.filter(p=>p.type===type);
+  if(state!=='all')list=list.filter(p=>p.state===state);
+  list=list.filter(p=>p.price<=maxP&&p.beds>=minB);
+  if(sort==='pa')list.sort((a,b)=>a.price-b.price);
+  else if(sort==='pd')list.sort((a,b)=>b.price-a.price);
+  else if(sort==='disc')list.sort((a,b)=>(1-b.price/b.arv)-(1-a.price/a.arv));
+  renderProps(list);
+  showSnack(list.length+' properties found');
+}
+
+function toggleWL(id){
+  if(watchlist.has(id)){watchlist.delete(id);showSnack('Removed from watchlist');}
+  else{watchlist.add(id);showSnack('Saved to watchlist!');}
+  document.getElementById('qf-wl-count').textContent=watchlist.size;
+  const pc=document.getElementById('port-count');
+  pc.style.display=watchlist.size>0?'block':'none';
+  pc.textContent=watchlist.size;
+  doSearch();
+}
+
+function toggleWLView(){
+  showWL=!showWL;
+  document.getElementById('wl-btn-lbl').textContent=showWL?'All Props':'Watchlist';
+  document.querySelectorAll('.qf-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(showWL?'qf-watch':'qf-all').classList.add('active');
+  doSearch();
+}
+
+function openAuction(url,name){showSnack('Opening '+name+'…');setTimeout(()=>window.open(url,'_blank'),400);}
+
+function openModal(id){
+  const p=PROPERTIES.find(x=>x.id===id);
+  const disc=Math.round((1-p.price/p.arv)*100);
+  const isSaved=watchlist.has(p.id);
+  document.getElementById('modal-title').textContent=p.addr+', '+p.city+', '+p.state;
+  document.getElementById('modal-sub').textContent=p.county+' · APN: '+p.apn;
+  document.getElementById('modal-body').innerHTML=`
+    <div class="prop-badges" style="padding:0 0 10px">
+      ${p.type==='lien'?'<span class="bdg bdg-lien">TAX LIEN</span>':''}
+      ${p.type==='deed'?'<span class="bdg bdg-deed">TAX DEED</span>':''}
+      ${p.type==='fore'?'<span class="bdg bdg-fore">FORECLOSURE</span>':''}
+      <span class="bdg bdg-auction"><i class="fa fa-gavel" style="font-size:8px"></i> ${p.auction}</span>
+    </div>
+    <div class="detail-grid">
+      <div class="d-cell"><div class="d-lbl">Bid / Lien Price</div><div class="d-val" style="color:var(--green)">$${p.price.toLocaleString()}</div></div>
+      <div class="d-cell"><div class="d-lbl">ARV</div><div class="d-val">$${p.arv.toLocaleString()}</div></div>
+      <div class="d-cell"><div class="d-lbl">Discount to ARV</div><div class="d-val" style="color:var(--green)">${disc}% below market</div></div>
+      <div class="d-cell"><div class="d-lbl">Est. Rehab</div><div class="d-val">$${p.rehab.toLocaleString()}</div></div>
+      <div class="d-cell"><div class="d-lbl">Beds / Baths</div><div class="d-val">${p.beds}bd / ${p.baths}ba</div></div>
+      <div class="d-cell"><div class="d-lbl">Square Feet</div><div class="d-val">${p.sqft.toLocaleString()} sqft</div></div>
+      <div class="d-cell"><div class="d-lbl">Year Built</div><div class="d-val">${p.yr}</div></div>
+      <div class="d-cell"><div class="d-lbl">Lot Size</div><div class="d-val">${p.lot}</div></div>
+      ${p.interest?`<div class="d-cell"><div class="d-lbl">Interest Rate</div><div class="d-val" style="color:#a07000">${p.interest}% per annum</div></div>`:''}
+    </div>
+    <div style="margin-bottom:13px"><div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:rgba(12,16,34,0.4);margin-bottom:5px">Notes</div>
+      <div style="font-size:12px;color:rgba(12,16,34,0.7);line-height:1.55;padding:10px;background:var(--surface);border-radius:8px">${p.notes}</div>
+    </div>
+    <div style="display:flex;gap:7px;margin-bottom:7px">
+      <button class="btn" style="flex:2;justify-content:center" onclick="openAuction('${p.aurl}','${p.auction}')"><i class="fa fa-gavel"></i>Open ${p.auction}</button>
+      <button class="btn btn-ghost" style="flex:1;justify-content:center" onclick="openMaps(${p.id})"><i class="fa fa-map-location-dot"></i>Maps</button>
+      <button class="btn btn-ghost" style="flex:1;justify-content:center" onclick="openGIS(${p.id})"><i class="fa fa-layer-group"></i>GIS Map</button>
+    </div>
+    <div style="display:flex;gap:7px">
+      <button class="btn btn-ghost" style="flex:1;justify-content:center" onclick="loadCalc(${p.id});closeModal()"><i class="fa fa-calculator"></i>Analyze</button>
+      <button class="btn btn-ghost" style="flex:1;justify-content:center" onclick="toggleWL(${p.id});showSnack('Saved!')"><i class="fa fa-bookmark"></i>${isSaved?'Saved':'Save'}</button>
+    </div>`;
+  document.getElementById('modal-bg').classList.add('open');
+}
+function closeModal(){document.getElementById('modal-bg').classList.remove('open');}
+
+function mapsUrl(p){return'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(p.addr+', '+p.city+', '+p.state+' '+p.zip);}
+function openMaps(id){const p=PROPERTIES.find(x=>x.id===id);window.open(mapsUrl(p),'_blank');showSnack('Opening in Google Maps…');}
+function openGIS(id){const p=PROPERTIES.find(x=>x.id===id);window.open(p.gis,'_blank');showSnack('Opening '+p.county+' GIS parcel map…');}
+
+function renderMap(){
+  const area=document.getElementById('map-area');
+  const W=area.offsetWidth||700,H=area.offsetHeight||460;
+  const mType=document.getElementById('m-type').value;
+  const mState=document.getElementById('m-state').value;
+  let list=PROPERTIES;
+  if(mType!=='all')list=list.filter(p=>p.type===mType);
+  if(mState!=='all')list=list.filter(p=>p.state===mState);
+  document.getElementById('map-pins').innerHTML=list.map(p=>{
+    const x=(p.lng/100)*W,y=(p.lat/100)*H;
+    return `<div class="map-pin pin-${p.type}" style="left:${x}px;top:${y}px" onmouseenter="showMapTT(event,${p.id})" onmouseleave="hideMapTT()" onclick="openMaps(${p.id})"><div class="pin-bubble"><i class="fa fa-house" style="transform:rotate(45deg)"></i></div></div>`;
+  }).join('');
+  document.getElementById('map-list').innerHTML=list.map(p=>`
+    <div class="mini-prop">
+      <div class="mini-icon" onclick="openMaps(${p.id})" title="Open in Google Maps" style="cursor:pointer">📍</div>
+      <div class="mini-info">
+        <div class="mini-addr" onclick="openModal(${p.id})" style="cursor:pointer">${p.addr}</div>
+        <div class="mini-cnty">${p.county}</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
+          <div class="mini-price">$${p.price.toLocaleString()}</div>
+          <button onclick="openMaps(${p.id})" title="Open in Google Maps" style="border:none;background:rgba(21,122,78,0.1);color:var(--green);border-radius:5px;padding:2px 7px;font-size:10px;font-family:var(--font);cursor:pointer;display:flex;align-items:center;gap:3px;font-weight:600"><i class="fa fa-map-location-dot" style="font-size:9px"></i>Maps</button>
+          <button onclick="openGIS(${p.id})" title="${p.county} GIS Parcel Map" style="border:none;background:rgba(107,63,160,0.1);color:var(--purple);border-radius:5px;padding:2px 7px;font-size:10px;font-family:var(--font);cursor:pointer;display:flex;align-items:center;gap:3px;font-weight:600"><i class="fa fa-layer-group" style="font-size:9px"></i>GIS</button>
+          <button onclick="openModal(${p.id})" style="border:none;background:rgba(201,151,58,0.1);color:#7a5500;border-radius:5px;padding:2px 7px;font-size:10px;font-family:var(--font);cursor:pointer;display:flex;align-items:center;gap:3px;font-weight:600"><i class="fa fa-circle-info" style="font-size:9px"></i>Detail</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+function showMapTT(e,id){
+  const p=PROPERTIES.find(x=>x.id===id);
+  const tt=document.getElementById('map-tt');
+  const area=document.getElementById('map-area').getBoundingClientRect();
+  const disc=Math.round((1-p.price/p.arv)*100);
+  tt.innerHTML=`<strong style="font-size:12px">${p.addr}</strong>
+    <div style="color:rgba(255,255,255,0.45);font-size:10px;margin:2px 0 5px">${p.county}, ${p.state}</div>
+    <div style="color:var(--gold2);font-weight:700;font-family:var(--mono);font-size:14px">$${p.price.toLocaleString()}</div>
+    <div style="color:rgba(255,255,255,0.45);font-size:10px;margin-bottom:8px">ARV $${p.arv.toLocaleString()} · ${disc}% off</div>
+    <div style="display:flex;gap:6px">
+      <div style="flex:1;padding:5px 8px;background:rgba(21,122,78,0.25);border-radius:5px;font-size:10px;font-weight:700;color:#4ade80;text-align:center;cursor:pointer" onclick="openMaps(${p.id})"><i class="fa fa-map-location-dot" style="margin-right:3px"></i>Google Maps</div>
+      <div style="flex:1;padding:5px 8px;background:rgba(201,151,58,0.2);border-radius:5px;font-size:10px;font-weight:700;color:var(--gold2);text-align:center;cursor:pointer" onclick="openModal(${p.id})"><i class="fa fa-circle-info" style="margin-right:3px"></i>Detail</div>
+    </div>`;
+  tt.style.display='block';
+  tt.style.left=Math.min(e.clientX-area.left+14,area.width-200)+'px';
+  tt.style.top=Math.max(e.clientY-area.top-120,8)+'px';
+}
+function hideMapTT(){document.getElementById('map-tt').style.display='none';}
+
+function toggleMod(el,key){
+  if(activeMods.has(key)){activeMods.delete(key);el.classList.remove('on');}
+  else{activeMods.add(key);el.classList.add('on');}
+}
+
+async function runAI(){
+  const selId=+document.getElementById('ai-prop-sel').value;
+  const p=PROPERTIES.find(x=>x.id===selId)||PROPERTIES[0];
+  const mods=[...activeMods];
+  if(!mods.length){showSnack('Select at least one module');return;}
+  const key=apiKey||localStorage.getItem('tambiq_api_key')||'';
+  const btn=document.getElementById('ai-run-btn');
+  btn.disabled=true;
+  btn.innerHTML='<div class="spinner" style="border-top-color:var(--ink)"></div>Analyzing with Claude AI…';
+  const disc=Math.round((1-p.price/p.arv)*100);
+  const mao=Math.round(p.arv*0.7-p.rehab);
+  const netProfit=p.arv-p.price-p.rehab-8000;
+  const roi=Math.round((netProfit/(p.price+p.rehab+8000))*100);
+  document.getElementById('ai-result-area').style.display='block';
+  document.getElementById('ai-cur-score').style.display='flex';
+  document.getElementById('ai-metrics').innerHTML=`
+    <div class="ai-metric"><div class="ai-metric-val" style="color:var(--gold2)">$${p.price.toLocaleString()}</div><div class="ai-metric-lbl">Bid Price</div></div>
+    <div class="ai-metric"><div class="ai-metric-val" style="color:#4ade80">$${p.arv.toLocaleString()}</div><div class="ai-metric-lbl">ARV</div></div>
+    <div class="ai-metric"><div class="ai-metric-val">${disc}%</div><div class="ai-metric-lbl">Discount</div></div>`;
+  const resultBox=document.getElementById('ai-result-box');
+  resultBox.textContent='';
+  resultBox.classList.add('streaming');
+  const moduleMap={roi:'Deal Profitability & ROI Analysis',risk:'Market Risk Assessment',neighborhood:'Neighborhood Analysis',rehab:'Rehab Cost Validation',diligence:'Full Due Diligence Summary',strategy:'Exit Strategy Recommendations'};
+  const prompt=`You are a senior real estate investment analyst specializing in tax liens, tax deeds, and foreclosure acquisitions. Analyze this property for TambiQ Group LLC.\n\nPROPERTY DATA:\n- Address: ${p.addr}, ${p.city}, ${p.state} ${p.zip}\n- County: ${p.county} | APN: ${p.apn}\n- Type: ${p.type.toUpperCase()}${p.interest?' ('+p.interest+'% statutory interest)':''}\n- Bid Price: $${p.price.toLocaleString()} | ARV: $${p.arv.toLocaleString()} | Rehab: $${p.rehab.toLocaleString()}\n- Property: ${p.beds}bd/${p.baths}ba | ${p.sqft.toLocaleString()} sqft | Built ${p.yr}\n- Discount to ARV: ${disc}% | MAO (70%): $${mao.toLocaleString()}\n- Est. Net Profit: $${netProfit.toLocaleString()} | Est. ROI: ${roi}%\n- Notes: ${p.notes}\n\nANALYSIS MODULES REQUESTED: ${mods.map(m=>moduleMap[m]).join(', ')}\n\nProvide a structured report with: 1) Deal Score (A+/A/B+/B/C), 2) Analysis for each requested module with dollar figures, 3) Top 3 Risks, 4) Recommended Next Steps for TambiQ Group LLC. Use ✅ for positives and ⚠️ for warnings.`;
+  try{
+    const resp=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,messages:[{role:'user',content:prompt}]})});
+    const data=await resp.json();
+    resultBox.classList.remove('streaming');
+    if(data.error){resultBox.textContent='API Error: '+data.error.message+'\n\nPlease check your API key in the field above.';btn.disabled=false;btn.innerHTML='<i class="fa fa-robot"></i>Run AI Analysis';return;}
+    const text=data.content?.map(b=>b.text||'').join('')||'No response received.';
+    resultBox.textContent=text;
+    const sm=text.match(/Deal Score[:\s]+([A-C][+\-]?)/i);
+    const score=sm?sm[1]:'B';
+    const sc=score.startsWith('A')?'sc-A':score.startsWith('B')?'sc-B':'sc-C';
+    const badge=document.getElementById('ai-cur-score');
+    badge.textContent=score;badge.className='score-pill '+sc+' ml-auto';
+    aiHistory.unshift({prop:p.addr,state:p.state,time:new Date().toLocaleTimeString(),score,preview:text.substring(0,140)+'…'});
+    if(aiHistory.length>5)aiHistory.pop();
+    renderAIHistory();showSnack('AI analysis complete!');
+  }catch(err){
+    resultBox.classList.remove('streaming');
+    resultBox.textContent=`⚠️ Connection error. If you have an API key entered, make sure it is correct.\n\n— DEMO ANALYSIS (no API key) —\n\nDEAL SCORE: ${roi>20?'A':'B'} ${roi>20?'(Strong Buy)':'(Proceed with Caution)'}\n\n✅ DEAL PROFITABILITY\n• Bid: $${p.price.toLocaleString()} | ARV: $${p.arv.toLocaleString()} | ${disc}% discount\n• MAO (70% Rule): $${mao.toLocaleString()} — Bid is ${p.price<mao?'✅ BELOW MAO':'⚠️ ABOVE MAO'}\n• Est. Net Profit: $${netProfit.toLocaleString()} | Est. ROI: ${roi}%\n\n⚠️ TOP 3 RISKS\n1. IRS federal liens — check PACER before bidding\n2. ${p.type==='lien'?'Confirm redemption period with '+p.county:'Order full title search immediately'}\n3. Get 3 contractor bids to validate $${p.rehab.toLocaleString()} rehab estimate\n\n📋 NEXT STEPS FOR TAMBIQ GROUP LLC\n1. Order title search within 48 hours\n2. Schedule drive-by inspection this week\n3. Confirm auction date with ${p.auction}\n4. Validate ARV with 3 nearby comps`;
+  }
+  btn.disabled=false;btn.innerHTML='<i class="fa fa-robot"></i>Run AI Analysis';
+}
+
+function renderAIHistory(){
+  const sc=s=>s&&s.startsWith('A')?'sc-A':s&&s.startsWith('B')?'sc-B':'sc-C';
+  document.getElementById('ai-history-list').innerHTML=aiHistory.length?
+    aiHistory.map(h=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+        <span style="font-size:12px;font-weight:600">${h.prop}</span>
+        <span class="score-pill ${sc(h.score)}" style="font-size:10px;padding:2px 8px">${h.score}</span>
+      </div>
+      <div style="font-size:10px;color:rgba(12,16,34,0.5);font-family:var(--mono);margin-bottom:3px">${h.time}</div>
+      <div style="font-size:11px;color:rgba(12,16,34,0.55);line-height:1.4">${h.preview}</div>
+    </div>`).join(''):
+    '<div style="font-size:12px;color:rgba(12,16,34,0.4)">No analyses yet.</div>';
+}
+
+function fmt(n){return'$'+Math.round(n).toLocaleString();}
+function calcDeal(){
+  const purchase=+document.getElementById('c-purchase').value||0;
+  const arv=+document.getElementById('c-arv').value||0;
+  const rehab=+document.getElementById('c-rehab').value||0;
+  const closing=+document.getElementById('c-closing').value||0;
+  const holdMo=+document.getElementById('c-hold').value||0;
+  const months=+document.getElementById('c-months').value||0;
+  const rate=+document.getElementById('c-rate').value||0;
+  const loan=+document.getElementById('c-loan').value||0;
+  const exit=document.getElementById('c-exit').value;
+  const interest=loan*(rate/100/12)*months;
+  const holding=holdMo*months;
+  const total=purchase+rehab+closing+interest+holding;
+  const mao=arv*0.7-rehab;
+  const net=arv-total;
+  const roi=total>0?(net/total)*100:0;
+  document.getElementById('rental-fields').style.display=exit==='rental'?'block':'none';
+  document.getElementById('rental-results').style.display=exit==='rental'?'block':'none';
+  document.getElementById('r-total').textContent=fmt(total);
+  document.getElementById('r-gross').textContent=fmt(arv-total);
+  document.getElementById('r-gross').className='r-val '+(arv-total>0?'g':'r');
+  document.getElementById('r-net').textContent=fmt(net);
+  document.getElementById('r-net').className='r-val '+(net>0?'g':'r');
+  document.getElementById('r-roi').textContent=roi.toFixed(1)+'%';
+  document.getElementById('r-roi').className='r-val '+(roi>15?'g':roi>0?'a':'r');
+  document.getElementById('r-interest').textContent=fmt(interest);
+  document.getElementById('r-mao').textContent=fmt(mao);
+  document.getElementById('r-equity').textContent=fmt(arv-total);
+  document.getElementById('r-be').textContent=fmt(total);
+  if(exit==='rental'){
+    const rent=+document.getElementById('c-rent').value||0;
+    const vac=+document.getElementById('c-vacancy').value||8;
+    const noi=rent*(1-vac/100)*0.6;
+    const cap=arv>0?(noi*12/arv)*100:0;
+    const coc=total>0?(noi*12/total)*100:0;
+    const grm=rent>0?arv/(rent*12):0;
+    document.getElementById('r-noi').textContent=fmt(noi)+'/mo';
+    document.getElementById('r-cap').textContent=cap.toFixed(1)+'%';
+    document.getElementById('r-coc').textContent=coc.toFixed(1)+'%';
+    document.getElementById('r-grm').textContent=grm.toFixed(1)+'x';
+  }
+  let sc='C',cls='sc-C',pct=20;
+  if(roi>30&&net>20000){sc='A+';cls='sc-A';pct=95;}
+  else if(roi>20&&net>10000){sc='A';cls='sc-A';pct=82;}
+  else if(roi>12&&net>5000){sc='B+';cls='sc-B';pct=68;}
+  else if(roi>8){sc='B';cls='sc-B';pct=55;}
+  else if(roi>0){sc='C+';cls='sc-C';pct=38;}
+  document.getElementById('calc-score').textContent=sc;
+  document.getElementById('calc-score').className='score-pill '+cls;
+  document.getElementById('calc-profit').textContent=fmt(net);
+  document.getElementById('gauge').style.width=pct+'%';
+  document.getElementById('gauge').style.background=pct>70?'#4ade80':pct>45?'#fbbf24':'#f87171';
+  const risks=[];
+  if(purchase>mao)risks.push({t:'⚠ Bid exceeds 70% rule MAO by '+fmt(purchase-mao),c:'var(--red)'});
+  if(roi<10)risks.push({t:'⚠ ROI below 10% minimum threshold',c:'#c09000'});
+  if(rehab/arv>0.4)risks.push({t:'⚠ Rehab cost exceeds 40% of ARV',c:'#c09000'});
+  if(months>9)risks.push({t:'ⓘ Hold period over 9 months increases risk',c:'#c09000'});
+  if(net>0&&roi>15)risks.push({t:'✓ Strong equity position',c:'var(--green)'});
+  if(purchase<=mao)risks.push({t:'✓ Bid at or below MAO',c:'var(--green)'});
+  document.getElementById('risk-flags').innerHTML=risks.length?risks.map(r=>`<div style="font-size:12px;color:${r.c};padding:5px 0;border-bottom:1px solid var(--border)">${r.t}</div>`).join(''):'<div style="font-size:12px;color:rgba(12,16,34,0.4)">Enter values above.</div>';
+  calcCache={purchase,arv,rehab,closing,holdMo,months,rate,loan,total,net,roi,mao};
+}
+
+function loadCalc(id){
+  const p=PROPERTIES.find(x=>x.id===id);
+  document.getElementById('c-purchase').value=p.price;
+  document.getElementById('c-arv').value=p.arv;
+  document.getElementById('c-rehab').value=p.rehab;
+  calcDeal();goPanel('calc');showSnack('Loaded: '+p.addr);
+}
+function sendToAI(){goPanel('ai');showSnack('Ready — run AI analysis');}
+function addToPortfolio(){
+  const d=calcCache;
+  if(!d.purchase){showSnack('Enter property values first');return;}
+  portfolio.push({id:Date.now(),addr:'Manual Entry '+(portfolio.length+1),state:'—',type:'flip',price:d.purchase||0,arv:d.arv||0,rehab:d.rehab||0,net:d.net||0,roi:Math.round(d.roi)||0,status:'watch'});
+  showSnack('Added to portfolio!');
+}
+
+function setPortTab(tab,btn){
+  portTab=tab;
+  document.querySelectorAll('.port-tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');renderPortfolio();
+}
+
+function renderPortfolio(){
+  const wlItems=PROPERTIES.filter(p=>watchlist.has(p.id)).map(p=>({
+    id:p.id,addr:p.addr,state:p.state,type:p.type,price:p.price,arv:p.arv,rehab:p.rehab,
+    net:p.arv-p.price-p.rehab-8000,
+    roi:Math.round(((p.arv-p.price-p.rehab-8000)/(p.price+p.rehab+8000))*100),
+    status:'watch'
+  }));
+  const all=[...wlItems,...portfolio];
+  const filtered=all.filter(x=>x.status===portTab);
+  const totI=all.reduce((s,x)=>s+(x.price+x.rehab),0);
+  const totP=all.reduce((s,x)=>s+x.net,0);
+  const avgR=all.length?Math.round(all.reduce((s,x)=>s+x.roi,0)/all.length):0;
+  document.getElementById('port-summary').innerHTML=`
+    <div class="ps-card"><div class="ps-val">${all.length}</div><div class="ps-lbl">Properties</div></div>
+    <div class="ps-card"><div class="ps-val" style="color:var(--green)">$${(totI/1000).toFixed(0)}K</div><div class="ps-lbl">Invested</div></div>
+    <div class="ps-card"><div class="ps-val" style="color:#a07000">$${(totP/1000).toFixed(0)}K</div><div class="ps-lbl">Est. Profit</div></div>
+    <div class="ps-card"><div class="ps-val" style="color:var(--blue)">${avgR}%</div><div class="ps-lbl">Avg ROI</div></div>
+    <div class="ps-card"><div class="ps-val">${watchlist.size}</div><div class="ps-lbl">Watchlist</div></div>`;
+  document.getElementById('port-body').innerHTML=filtered.length?
+    filtered.map(x=>`<tr>
+      <td style="font-weight:600;font-size:12px">${x.addr}</td>
+      <td><span class="bdg ${x.type==='lien'?'bdg-lien':x.type==='deed'?'bdg-deed':'bdg-fore'}" style="font-size:9px">${x.type.toUpperCase()}</span></td>
+      <td style="font-family:var(--mono);font-size:11px">${x.state}</td>
+      <td style="font-family:var(--mono);font-weight:600;font-size:12px">$${x.price.toLocaleString()}</td>
+      <td style="font-family:var(--mono);font-size:12px">$${x.arv.toLocaleString()}</td>
+      <td style="font-family:var(--mono);font-weight:600;font-size:12px;color:${x.net>0?'var(--green)':'var(--red)'}">$${x.net.toLocaleString()}</td>
+      <td style="font-family:var(--mono);font-weight:600;font-size:12px;color:${x.roi>15?'var(--green)':x.roi>0?'#a07000':'var(--red)'}">${x.roi}%</td>
+      <td><span class="ps-badge ${x.status==='watch'?'ps-watch':x.status==='active'?'ps-active':'ps-closed'}">${x.status==='watch'?'Watching':x.status==='active'?'Active':'Closed'}</span></td>
+      <td><button onclick="removePort(${x.id})" style="border:none;background:none;cursor:pointer;color:rgba(12,16,34,0.3);font-size:13px">×</button></td>
+    </tr>`).join(''):
+    '<tr><td colspan="9" style="text-align:center;padding:28px;color:rgba(12,16,34,0.4);font-size:13px">No properties here yet</td></tr>';
+}
+
+function removePort(id){portfolio=portfolio.filter(x=>x.id!==id);watchlist.delete(id);document.getElementById('qf-wl-count').textContent=watchlist.size;doSearch();renderPortfolio();showSnack('Removed');}
+
+function renderScope(){
+  document.getElementById('scope-body').innerHTML=scopeRows.map(r=>`
+    <tr class="sc-row">
+      <td><span class="cat-pill ${r.cc}">${r.cat.substring(0,3).toUpperCase()}</span></td>
+      <td><input class="sc-inp" value="${r.desc}" style="width:100%;min-width:130px" onchange="scopeRows.find(x=>x.id===${r.id}).desc=this.value"></td>
+      <td><input class="sc-inp" value="${r.unit}" style="width:40px" onchange="scopeRows.find(x=>x.id===${r.id}).unit=this.value"></td>
+      <td><input class="sc-inp" type="number" value="${r.qty}" style="width:50px" oninput="scopeRows.find(x=>x.id===${r.id}).qty=+this.value;updateScope()"></td>
+      <td><input class="sc-inp" type="number" value="${r.cost}" style="width:70px" oninput="scopeRows.find(x=>x.id===${r.id}).cost=+this.value;updateScope()"></td>
+      <td style="font-family:var(--mono);font-weight:600;font-size:12px;color:var(--green);white-space:nowrap">$${Math.round(r.qty*r.cost).toLocaleString()}</td>
+      <td><button onclick="scopeRows=scopeRows.filter(x=>x.id!==${r.id});renderScope()" style="border:none;background:none;cursor:pointer;color:rgba(12,16,34,0.25);font-size:13px">×</button></td>
+    </tr>`).join('');
+  updateScope();
+}
+
+function updateScope(){
+  const total=scopeRows.reduce((s,r)=>s+r.qty*r.cost,0);
+  document.getElementById('scope-total').textContent='$'+Math.round(total).toLocaleString();
+  document.getElementById('contingency').textContent='$'+Math.round(total*0.15).toLocaleString();
+  const wks=Math.max(4,Math.round(total/5000));
+  document.getElementById('timeline-est').textContent=wks+'–'+(wks+2)+' weeks';
+  const cats={},colors={Structural:'#c03b3b',Mechanical:'#1653a0',Cosmetic:'#157a4e',Exterior:'#8a6000'};
+  scopeRows.forEach(r=>{cats[r.cat]=(cats[r.cat]||0)+r.qty*r.cost;});
+  document.getElementById('scope-breakdown').innerHTML=Object.entries(cats).map(([k,v])=>`
+    <div style="margin-bottom:9px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-size:12px;font-weight:600">${k}</span><span style="font-size:12px;font-family:var(--mono);font-weight:600">$${Math.round(v).toLocaleString()}</span></div>
+      <div style="height:5px;background:var(--surface);border-radius:3px;overflow:hidden"><div style="height:100%;background:${colors[k]};border-radius:3px;width:${total>0?Math.round(v/total*100):0}%"></div></div>
+      <div style="font-size:10px;color:rgba(12,16,34,0.4);margin-top:1px">${total>0?Math.round(v/total*100):0}% of total</div>
+    </div>`).join('');
+}
+
+function addScopeRow(){
+  const cats=[{cat:'Structural',cc:'c-str'},{cat:'Mechanical',cc:'c-mec'},{cat:'Cosmetic',cc:'c-cos'},{cat:'Exterior',cc:'c-ext'}];
+  const c=cats[nextScopeId%4];
+  scopeRows.push({id:nextScopeId++,...c,desc:'New line item',unit:'LS',qty:1,cost:1000});
+  renderScope();
+}
+
+function renderDD(){
+  document.getElementById('dd-content').innerHTML=DD_SECTIONS.map((sec,si)=>`
+    <div class="card">
+      <div class="dd-sec-hd"><i class="fa ${sec.icon}"></i>${sec.title}</div>
+      ${sec.items.map((item,ii)=>`
+        <div class="dd-item" onclick="toggleDD(${si},${ii})">
+          <div class="dd-chk ${ddState[si+'_'+ii]?'on':''}">${ddState[si+'_'+ii]?'<i class="fa fa-check" style="font-size:9px"></i>':''}</div>
+          <div class="dd-txt" style="${ddState[si+'_'+ii]?'text-decoration:line-through;opacity:0.45':''}">${item.t}${item.n?`<small>${item.n}</small>`:''}</div>
+          <span class="dd-st ${item.s==='critical'?'st-crit':item.s==='important'?'st-imp':'st-std'}">${item.s}</span>
+        </div>`).join('')}
+    </div>`).join('');
+  const total=DD_SECTIONS.reduce((s,sec)=>s+sec.items.length,0);
+  const done=Object.values(ddState).filter(Boolean).length;
+  const pct=Math.round(done/total*100);
+  document.getElementById('dd-fill').style.width=pct+'%';
+  document.getElementById('dd-pct').textContent=pct+'%';
+}
+function toggleDD(si,ii){ddState[si+'_'+ii]=!ddState[si+'_'+ii];renderDD();}
+
+function renderAuctions(){
+  document.getElementById('auction-list').innerHTML=AUCTIONS.map(a=>`
+    <div class="auc-card" onclick="window.open('${a.url}','_blank')">
+      <div class="auc-logo" style="background:${a.lb};color:${a.lc}">${a.logo}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px;font-weight:700;margin-bottom:3px">${a.name}</div>
+        <div style="font-size:12px;color:rgba(12,16,34,0.5);line-height:1.4;margin-bottom:6px">${a.desc}</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">${a.tags.map(t=>`<span class="auc-tag">${t}</span>`).join('')}<span class="auc-tag" style="background:rgba(21,122,78,0.07);color:var(--green);border-color:rgba(21,122,78,0.2)">${a.props.toLocaleString()} listings</span><span class="auc-tag">${a.states} states</span></div>
+      </div>
+      <a class="auc-visit" href="${a.url}" target="_blank" onclick="event.stopPropagation()"><i class="fa fa-arrow-up-right-from-square"></i>Visit</a>
+    </div>`).join('');
+}
+
+function renderCountyChips(){
+  document.getElementById('state-chips').innerHTML=Object.keys(COUNTIES).map(s=>`
+    <button class="st-chip ${s===activeCountyState?'on':''}" onclick="setCounty('${s}')">${s}</button>`).join('');
+}
+function setCounty(s){activeCountyState=s;renderCountyChips();renderCountyTable();}
+function renderCountyTable(){
+  const data=COUNTIES[activeCountyState]||[];
+  document.getElementById('county-body').innerHTML=data.map(c=>`
+    <tr>
+      <td style="font-weight:600">${c.county} County</td>
+      <td style="font-family:var(--mono);font-size:11px">${activeCountyState}</td>
+      <td><a class="cnty-link" href="https://${c.tr}" target="_blank">${c.tr} <i class="fa fa-arrow-up-right-from-square" style="font-size:9px"></i></a></td>
+      <td><a class="cnty-link" href="https://${c.assr}" target="_blank">${c.assr} <i class="fa fa-arrow-up-right-from-square" style="font-size:9px"></i></a></td>
+      <td><span class="bdg ${c.type.includes('Lien')?'bdg-lien':'bdg-deed'}" style="font-size:9px">${c.type}</span></td>
+      <td style="font-size:11px;color:rgba(12,16,34,0.55)">${c.rate}</td>
+    </tr>`).join('');
+}
+
+function exportPortExcel(){
+  const wlItems=PROPERTIES.filter(p=>watchlist.has(p.id)).map(p=>({'Address':p.addr,'City':p.city,'State':p.state,'County':p.county,'Type':p.type.toUpperCase(),'Bid Price':p.price,'ARV':p.arv,'Est Rehab':p.rehab,'Est Profit':p.arv-p.price-p.rehab-8000,'ROI %':Math.round(((p.arv-p.price-p.rehab-8000)/(p.price+p.rehab+8000))*100),'Discount %':Math.round((1-p.price/p.arv)*100),'Auction':p.auction,'Auction URL':p.aurl,'APN':p.apn,'Status':'Watching'}));
+  const manual=portfolio.map(x=>({'Address':x.addr,'City':'','State':x.state,'County':'','Type':x.type.toUpperCase(),'Bid Price':x.price,'ARV':x.arv,'Est Rehab':x.rehab,'Est Profit':x.net,'ROI %':x.roi,'Discount %':'','Auction':'','Auction URL':'','APN':'','Status':x.status}));
+  const all=[...wlItems,...manual];
+  if(!all.length){showSnack('Add properties to watchlist first');return;}
+  const ws=XLSX.utils.json_to_sheet(all);
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,'Portfolio',ws);
+  XLSX.writeFile(wb,'TambIQ_Portfolio.xlsx');
+  showSnack('Portfolio downloaded!');
+}
+
+function exportScopeExcel(){
+  const rows=scopeRows.map(r=>({'Category':r.cat,'Description':r.desc,'Unit':r.unit,'Quantity':r.qty,'Unit Cost':r.cost,'Total':Math.round(r.qty*r.cost)}));
+  const total=scopeRows.reduce((s,r)=>s+r.qty*r.cost,0);
+  rows.push({'Category':'','Description':'SUBTOTAL','Unit':'','Quantity':'','Unit Cost':'','Total':Math.round(total)});
+  rows.push({'Category':'','Description':'15% Contingency','Unit':'','Quantity':'','Unit Cost':'','Total':Math.round(total*0.15)});
+  rows.push({'Category':'','Description':'TOTAL WITH CONTINGENCY','Unit':'','Quantity':'','Unit Cost':'','Total':Math.round(total*1.15)});
+  const ws=XLSX.utils.json_to_sheet(rows);
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,'Rehab Scope',ws);
+  XLSX.writeFile(wb,'TambIQ_Rehab_Scope.xlsx');
+  showSnack('Rehab scope downloaded!');
+}
+
+function exportSearchExcel(){
+  const rows=PROPERTIES.map(p=>({'Address':p.addr,'City':p.city,'State':p.state,'County':p.county,'Type':p.type.toUpperCase(),'Bid Price':p.price,'ARV':p.arv,'Est Rehab':p.rehab,'Beds':p.beds,'Baths':p.baths,'Sqft':p.sqft,'Year Built':p.yr,'APN':p.apn,'Auction':p.auction,'Auction URL':p.aurl}));
+  const ws=XLSX.utils.json_to_sheet(rows);
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,'Search Results',ws);
+  XLSX.writeFile(wb,'TambIQ_Properties.xlsx');
+  showSnack('Properties downloaded!');
+}
+
+function exportDDReport(){
+  const total=DD_SECTIONS.reduce((s,sec)=>s+sec.items.length,0);
+  const done=Object.values(ddState).filter(Boolean).length;
+  let txt='TAMBIQ GROUP LLC — DUE DILIGENCE REPORT\nGenerated: '+new Date().toLocaleString()+'\nCompletion: '+done+'/'+total+' items ('+Math.round(done/total*100)+'%)\n\n';
+  DD_SECTIONS.forEach((sec,si)=>{
+    txt+='=== '+sec.title.toUpperCase()+' ===\n';
+    sec.items.forEach((item,ii)=>{txt+=(ddState[si+'_'+ii]?'[✓] ':'[ ] ')+'['+item.s.toUpperCase()+'] '+item.t+'\n';if(item.n)txt+='    → '+item.n+'\n';});
+    txt+='\n';
+  });
+  const blob=new Blob([txt],{type:'text/plain'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='TambIQ_DD_Report.txt';a.click();
+  showSnack('Due diligence report downloaded!');
+}
+
+function exportAIReport(){
+  let txt='TAMBIQ GROUP LLC — AI DEAL ANALYSIS REPORT\nGenerated: '+new Date().toLocaleString()+'\n\n';
+  if(!aiHistory.length)txt+='No analyses run yet.\n';
+  else aiHistory.forEach((h,i)=>{txt+='--- ANALYSIS '+(i+1)+': '+h.prop+', '+h.state+' ---\nScore: '+h.score+' | Time: '+h.time+'\n'+h.preview+'\n\n';});
+  const blob=new Blob([txt],{type:'text/plain'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='TambIQ_AI_Analyses.txt';a.click();
+  showSnack('AI report downloaded!');
+}
+
+function exportCountyCSV(){
+  let csv='County,State,Sale Type,Rate/Notes,Treasurer URL,Assessor URL\n';
+  Object.entries(COUNTIES).forEach(([st,list])=>list.forEach(c=>{csv+='"'+c.county+' County",'+st+',"'+c.type+'","'+c.rate+'","https://'+c.tr+'","https://'+c.assr+'"\n';}));
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='TambIQ_County_Records.csv';a.click();
+  showSnack('County records downloaded!');
+}
+
+function showSnack(msg){
+  const s=document.getElementById('snack');
+  document.getElementById('snack-msg').textContent=msg;
+  s.classList.add('show');
+  clearTimeout(snackTimer);
+  snackTimer=setTimeout(()=>s.classList.remove('show'),2800);
+}
+
+function renderTypeCounts(){
+  const counts={lien:0,deed:0,fore:0};
+  PROPERTIES.forEach(p=>{counts[p.type]++;});
+  ['lien','deed','fore'].forEach(t=>{
+    document.getElementById('qf-'+t+'-count').textContent=counts[t].toLocaleString();
+    document.getElementById('stat-'+t+'-count').textContent=counts[t].toLocaleString();
+  });
+}
+
+initDropdowns();
+renderTypeCounts();
+renderStateSummary();
+renderProps(PROPERTIES);
+calcDeal();
+renderScope();
+renderDD();
+renderAuctions();
+renderCountyChips();
+renderCountyTable();
+renderAIHistory();
+</script>
+</body>
+</html>

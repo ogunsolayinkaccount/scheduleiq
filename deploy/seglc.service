@@ -1,0 +1,27 @@
+[Unit]
+Description=SEGLC Schedule Analytics — Django/Gunicorn backend
+After=network.target
+
+[Service]
+User=azureuser
+Group=azureuser
+WorkingDirectory=/home/azureuser/seglc_backend
+
+# Activate the virtual environment and start Gunicorn
+ExecStart=/home/azureuser/seglc_backend/venv/bin/gunicorn \
+          --workers 3 \
+          --bind unix:/run/seglc.sock \
+          --timeout 120 \
+          --access-logfile /home/azureuser/seglc_backend/logs/gunicorn_access.log \
+          --error-logfile  /home/azureuser/seglc_backend/logs/gunicorn_error.log \
+          seglc_backend.wsgi:application
+
+Restart=always
+RestartSec=5
+
+# Give the socket file the right permissions for Nginx
+RuntimeDirectory=seglc
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
