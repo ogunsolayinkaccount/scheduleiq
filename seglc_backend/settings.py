@@ -3,6 +3,30 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal, dependency-free .env loader (matches this codebase's
+    existing preference for stdlib-only implementations over adding a
+    package — see scheduler/ai/providers/openai_provider.py). Only sets a
+    variable if it isn't already present in the real process environment,
+    so a real env var always wins over the file. `.env` is git-ignored —
+    see .gitignore — and never committed. Silently does nothing if the
+    file doesn't exist; never raises on a malformed line."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(BASE_DIR / '.env')
+
 # ── Security ──────────────────────────────────────────────────────────────────
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",

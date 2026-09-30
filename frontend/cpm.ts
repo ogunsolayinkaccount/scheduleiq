@@ -115,14 +115,20 @@ function durationOf(a: any): number {
   return a.remainDur ?? a.dur ?? 0;
 }
 
-function anchorStart(a: any, dd: Date | null): number {
+function anchorStart(a: any, dd: Date): number {
   if (a.start instanceof Date) return a.start.getTime();
-  return (dd || new Date()).getTime();
+  return dd.getTime();
 }
 
 // Forward + backward pass over one project's network. `group` must already have
 // predecessors/successors rebuilt by applyLogicEdits.
 function computeProjectCPM(group: any[], dd: Date | null): any[] {
+  if (!dd) {
+    // A genuine CPM recompute must anchor not-yet-started activities to the
+    // schedule's own effective Data Date — never today's date. Without one,
+    // skip the recompute rather than silently anchoring to today.
+    return group.map(a => ({ ...a, cpmError: 'Data Date unavailable — recompute skipped' }));
+  }
   const byId: Record<string, any> = {};
   group.forEach(a => { byId[actKey(a)] = a; });
 

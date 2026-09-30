@@ -1,6 +1,21 @@
 import { useState, useCallback, useMemo, useRef, useEffect, Fragment, createContext, useContext } from "react";
 import { idbSave, idbLoadAll, idbDelete } from "./idb";
+import { notifyProjectsChanged } from "./projectEvents";
+import IntelligenceSync from "./IntelligenceSync";
+import ImportCenter from "./ImportCenter";
+import UpdateAnalysis from "./UpdateAnalysis";
+import ProjectControls from "./ProjectControls";
+import BaselineProgress from "./BaselineProgress";
+import GanttView from "./GanttView";
+import RiskIntelligence from "./RiskIntelligence";
+import ActivityAnalysis from "./ActivityAnalysis";
+import FloatAnalysis from "./FloatAnalysis";
+import Intelligence from "./Intelligence";
+import Dashboard from "./Dashboard";
+import Reports from "./Reports";
 import { applyLogicEdits, computeCPM, wouldCreateCycle, linkKey, type RelType, type LogicEdit, type LogicEditMap } from "./cpm";
+import { pickDrivingRel, tracePath } from "./pathTrace";
+import { legacyFilterToActivityAnalysis, activityJumpFilter } from "./activityNavigation";
 import {
   Area, BarChart, Bar, PieChart, Pie, Cell, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -194,6 +209,18 @@ function detectBaseline(activities:any[]):{hasBaseline:boolean;coverage:number;i
 //  Total Float (adjusted)
 //    → late_end_date (lateFinish) – Forecast Finish  when CPM late dates available
 //    → BL Finish + original float – Forecast Finish  otherwise
+// Picks the effective Data Date to drive the toolbar from a list of
+// session file objects — the last one (most recently imported/loaded)
+// that actually carries an effective dataDate. Never falls back to
+// today's date itself; callers decide what to do when this returns null
+// (typically: leave the toolbar's current value untouched).
+function pickEffectiveDataDate(list:any[]):string|null{
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]?.dataDate)return list[i].dataDate;
+  }
+  return null;
+}
+
 function applyDataDate(activities:any[], dataDateStr:string):any[]{
   const dd=parseDate(dataDateStr);
   if(!dd)return activities;
@@ -426,7 +453,11 @@ function ProjectSelector({files,selectedIds,onChange,onDelete}:any){
                     <button
                       type="button"
                       title="Delete project"
-                      onClick={e=>{e.stopPropagation();if(window.confirm(`Delete "${f.name}"? This cannot be undone.`))onDelete(f.id);}}
+                      onClick={e=>{e.stopPropagation();const msg=f.scheduleUploadId?`Delete "${f.name}"?
+
+This removes this schedule version from ScheduleIQ, including the Intelligence Portal, together with its dependent analysis data. Other versions of the same project are kept.
+
+This cannot be undone.`:`Delete "${f.name}"? This cannot be undone.`;if(window.confirm(msg))onDelete(f.id);}}
                       style={{background:'transparent',border:'none',color:C.muted,cursor:'pointer',
                         fontSize:14,padding:'2px 4px',lineHeight:1,flexShrink:0,
                         borderRadius:4,transition:'color 0.15s'}}
@@ -951,28 +982,36 @@ function generateDemo(){
 }
 
 // ─── HEADER ───────────────────────────────────────────────────────────────────
-function Header({files,selectedIds,onSelectionChange,onAddFiles,onReset,view,setView,allActivities,onGoToActivity,dataDate,onDataDateChange,onDeleteProject}:any){
+function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,setView,allActivities,onGoToActivity,dataDate,onDataDateChange,onResetDataDateToToday,onDeleteProject}:any){
   const addRef=useRef<HTMLInputElement>(null);
   const todayStr=new Date().toISOString().slice(0,10);
   const isForward=dataDate>todayStr;
   const isPast=dataDate<todayStr;
   const nav=[
+    {id:"dashboard", label:"Dashboard",    icon:"📌", highlight:true},
     {id:"portfolio", label:"Portfolio",    icon:"🏢"},
     {id:"scurve",    label:"S-Curves",     icon:"📈"},
+    {id:"gantt",     label:"Gantt",        icon:"📅", highlight:true},
     {id:"critical",  label:"Critical Path",icon:"🔴"},
     {id:"variance",  label:"Variance",     icon:"📐",highlight:true},
     {id:"evm",       label:"EVM & MH",     icon:"💰",highlight:true},
     {id:"histogram", label:"Histograms",   icon:"📊"},
-    {id:"comparison",label:"Comparison",   icon:"⚖️"},
-    {id:"activities",label:"Activities",   icon:"📋"},
     {id:"diff",      label:"Schedule Diff",icon:"🔀"},
     {id:"oos",       label:"Out of Sequence",icon:"⚠️", highlight:true},
-    {id:"quality",   label:"Logic Check",  icon:"🔗"},
+    {id:"quality",   label:"Open Ends Check",  icon:"🔗"},
     {id:"narrative", label:"Narrative",    icon:"📝"},
     {id:"tia",       label:"Time Impact",  icon:"⏱️", highlight:true},
-    {id:"powerbi",   label:"Power BI",     icon:"📊", highlight:true},
+    {id:"powerbi",   label:"Cross-Filter Dashboard",     icon:"📊", highlight:true},
     {id:"resources", label:"Resources",    icon:"👷", highlight:true},
     {id:"status",    label:"Status",       icon:"🎯", highlight:true},
+    {id:"updateAnalysis", label:"Update Analysis", icon:"🔄", highlight:true},
+    {id:"activityAnalysis", label:"Activity Analysis", icon:"📋", highlight:true},
+    {id:"floatAnalysis", label:"Float Analysis", icon:"🧭", highlight:true},
+    {id:"riskIntel",   label:"Risk & Milestones", icon:"🌡️", highlight:true},
+    {id:"projectControls", label:"Project Controls", icon:"🧮", highlight:true},
+    {id:"baselineProgress", label:"Baseline & Progress", icon:"📐", highlight:true},
+    {id:"intelligence", label:"Intelligence",    icon:"🧠", highlight:true},
+    {id:"reports",      label:"Reports",          icon:"🖨️", highlight:true},
   ];
   return(
     <div style={{background:C.panel,borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,zIndex:100}}>
@@ -986,6 +1025,7 @@ function Header({files,selectedIds,onSelectionChange,onAddFiles,onReset,view,set
           </span>
         </div>
         <ProjectSelector files={files} selectedIds={selectedIds} onChange={onSelectionChange} onDelete={onDeleteProject}/>
+        <IntelligenceSync files={files}/>
 
         {/* ── Global Search ── */}
         {allActivities?.length>0&&<GlobalSearch allActivities={allActivities} onGoToActivity={onGoToActivity}/>}
@@ -1004,13 +1044,13 @@ function Header({files,selectedIds,onSelectionChange,onAddFiles,onReset,view,set
             />
           </div>
           {dataDate!==todayStr&&(
-            <button onClick={()=>onDataDateChange(todayStr)}
-              title="Reset to today"
+            <button onClick={()=>onResetDataDateToToday(todayStr)}
+              title="Reset to today (session projection only — does not change the schedule's stored Data Date)"
               style={{background:"transparent",border:"none",color:C.muted,cursor:"pointer",fontSize:12,padding:0,lineHeight:1}}>✕</button>
           )}
         </div>
 
-        <input ref={addRef} type="file" accept=".xer,.xlsx,.xls,.csv,.xml,.pdf,.mpp" multiple onChange={async e=>{const res:any[]=[];for(const f of Array.from(e.target.files||[])){try{const r=await processFileViaAPI(f);if(r)res.push(r);}catch{}}if(res.length)onAddFiles(res);(e.target as HTMLInputElement).value="";}} style={{display:"none"}}/>
+        <input ref={addRef} type="file" accept=".xer,.xlsx,.xls,.csv,.xml,.pdf,.mpp" multiple onChange={e=>{const fl=Array.from(e.target.files||[]);if(fl.length)onSelectFiles(fl);(e.target as HTMLInputElement).value="";}} style={{display:"none"}}/>
         <button onClick={()=>addRef.current?.click()} style={{background:"rgba(0,200,240,0.08)",border:`1px solid ${C.accent}`,color:C.accent,borderRadius:8,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>+ Add Files</button>
         <button onClick={onReset} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap",marginLeft:"auto"}}>↩ New Session</button>
       </div>
@@ -1027,6 +1067,11 @@ function Header({files,selectedIds,onSelectionChange,onAddFiles,onReset,view,set
 
 // ─── VIEWS ────────────────────────────────────────────────────────────────────
 function PortfolioView({M,files,selectedIds,allActivities,onGoToFilter,onGoToProject}:any){
+  // Dashboard Consolidation Phase 1: the former standalone "Comparison" nav
+  // item was the same M.projects rollup as this view, just styled as a
+  // detailed table — absorbed here as a toggle instead of a second nav
+  // item, reusing ComparisonView as-is (zero duplicated calculation).
+  const [tableView,setTableView]=useState(false);
   const acts=allActivities||[];
   const isComplete =(a:any)=>(a.pctComplete||0)>=100||a.totalFloat==null||a.status==="TK_Complete";
   const compCount  =useMemo(()=>acts.filter(isComplete).length,[acts]);
@@ -1055,6 +1100,12 @@ function PortfolioView({M,files,selectedIds,allActivities,onGoToFilter,onGoToPro
   ];
 
   return(<>
+    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:8}}>
+      <button onClick={()=>setTableView(v=>!v)}
+        style={{background:tableView?C.accent:"transparent",color:tableView?"#fff":C.muted,border:`1px solid ${C.border}`,borderRadius:7,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+        {tableView?"📊 Card View":"📋 Table View"}
+      </button>
+    </div>
     <Sec title="Portfolio KPIs" icon="🏢">
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:9,marginBottom:20}}>
         {kpis.map(k=>(
@@ -1118,6 +1169,7 @@ function PortfolioView({M,files,selectedIds,allActivities,onGoToFilter,onGoToPro
         <CC title="Monthly Activity Trend" flex="2 1 360px" height={190}><ResponsiveContainer><BarChart data={M.monthlyTrend.slice(-18)} margin={{left:-10}}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted,fontSize:9}} interval={2}/><YAxis tick={{fill:C.muted,fontSize:9}}/><Tooltip content={<TT/>}/><Legend iconSize={9} wrapperStyle={{fontSize:10}}/><Bar dataKey="complete" name="Complete" fill={C.green} stackId="a"/><Bar dataKey="inProgress" name="In Progress" fill={C.accent} stackId="a"/><Bar dataKey="notStarted" name="Not Started" fill={C.muted} stackId="a"/></BarChart></ResponsiveContainer></CC>
       </div>
     </Sec>
+    {tableView && <ComparisonView M={M} files={files}/>}
   </>);
 }
 
@@ -1164,23 +1216,12 @@ function SCurveView({M,allActivities,files}:any){
         </CC>
       </div>
     </Sec>
-    <Sec title="Individual Project S-Curves" icon="📉" printable={true}>
-      <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
-        {M.projects.map((p:any,pi:number)=>{
-          const pa=allActivities.filter((a:any)=>a.projectId===p.id&&a.bFinish).sort((a:any,b:any)=>a.bFinish-b.bFinish);
-          if(!pa.length)return null;
-          const dates=allActivities.filter((a:any)=>a.projectId===p.id&&(a.bStart||a.bFinish)).map((a:any)=>a.bStart||a.bFinish);
-          const minD=new Date(Math.min(...dates.map((d:Date)=>d.getTime()))),maxD=pa[pa.length-1].bFinish;
-          const months:Date[]=[];let cur=new Date(minD.getFullYear(),minD.getMonth(),1);const end=new Date(maxD.getFullYear(),maxD.getMonth()+1,1);
-          while(cur<=end){months.push(new Date(cur));cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);}
-          const curve=months.map(m=>{const mE=new Date(m.getFullYear(),m.getMonth()+1,0);const pl=pa.filter((a:any)=>a.bFinish&&a.bFinish<=mE).length;const ac=pa.filter((a:any)=>{const f=a.finish||a.bFinish;return f&&f<=mE&&a.pctComplete>=100;}).length;return{month:fmtShort(m),planned:pct(pl,pa.length),actual:pct(ac,pa.length)};});
-          return(<CC key={p.id} title={p.name} flex="1 1 360px" height={190}>
-            <ResponsiveContainer><LineChart data={curve} margin={{left:-10}}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted,fontSize:9}} interval={Math.max(0,Math.floor(curve.length/8))}/><YAxis tick={{fill:C.muted,fontSize:9}} unit="%"/><Tooltip content={<TT/>}/><Legend iconSize={9} wrapperStyle={{fontSize:10}}/>
-              <Line type="monotone" dataKey="planned" name="Planned" stroke={PLAN_COLOR} strokeWidth={2} dot={false} strokeDasharray="5 3"/>
-              <Line type="monotone" dataKey="actual" name="Actual" stroke={C.green} strokeWidth={2} dot={false}/>
-            </LineChart></ResponsiveContainer>
-          </CC>);
-        })}
+    <Sec title="Individual Project S-Curves" icon="📉">
+      <div style={{padding:"10px 16px",borderRadius:10,background:`${C.accent}10`,border:`1px solid ${C.accent}30`,display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:16}}>📈</span>
+        <div style={{fontSize:12,color:C.muted,lineHeight:1.5}}>
+          Per-project S-curves moved to <strong style={{color:C.text}}>Baseline & Progress</strong> — same backend scurve engine, with a configurable metric, milestone markers and a Data Date reference line this page didn't have. The portfolio rollup above stays here.
+        </div>
       </div>
     </Sec>
   </>);
@@ -1261,22 +1302,39 @@ function HistogramView({M,allActivities}:any){
     </Sec>
 
     {/* ── Manpower / Man-Hours Histograms ────────────────────────────────── */}
-    <Sec title={M.isHrLoaded?"Manpower Tracking — Resource Loaded":"Manpower Tracking (no resource data)"} icon="👷" printable={true}>
-      {!M.isHrLoaded&&<div style={{background:'rgba(212,168,67,0.07)',border:`1px solid ${C.gold}30`,borderRadius:8,padding:'10px 14px',fontSize:12,color:C.gold,marginBottom:14}}>
-        ⚠ No man-hour data in this schedule. Upload a resource-loaded XER from P6 to enable manpower tracking.
+    {(()=>{
+      // The KPI row below reads M.authoritativeProductivity (cost_engine.py's
+      // compute_productivity — the SAME engine Project Controls' Labor
+      // Productivity tab uses) instead of the legacy compute_metrics() mh.*
+      // fields it used to. That legacy path summed budgetedHours/actualHours
+      // etc. across ALL activities unconditionally and defaulted CPI to 1.0
+      // when there was no actual data — which reads as "on budget, zero
+      // remaining" for a schedule that simply isn't resource-loaded, a real,
+      // confirmed defect (see the pre-commit Manpower/MH reconciliation).
+      // The curves/histograms/per-project table further below are left on
+      // the legacy fields (no authoritative per-project/time-series
+      // breakdown is plumbed through M yet) — they're not misleading on
+      // their own, since they already render nothing when there's no data.
+      const prod=M.authoritativeProductivity?.overall;
+      const resourceLoaded=!!prod?.available;
+      const pctComplete=resourceLoaded&&prod.budgetedHours>0?Math.round((prod.earnedHours/prod.budgetedHours)*1000)/10:null;
+      return(
+    <Sec title={resourceLoaded?"Manpower Tracking — Resource Loaded":"Manpower Tracking (not resource loaded)"} icon="👷" printable={true}>
+      {!resourceLoaded&&<div style={{background:'rgba(212,168,67,0.07)',border:`1px solid ${C.gold}30`,borderRadius:8,padding:'10px 14px',fontSize:12,color:C.gold,marginBottom:14}}>
+        ⚠ Unavailable — Schedule is not resource loaded. Upload a resource-loaded XER from P6 to enable manpower tracking.
       </div>}
 
       {/* KPI row */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(145px,1fr))',gap:9,marginBottom:16}}>
         {[
-          {l:'Budgeted MH',   v:fmtH(mh.budgeted||0),    d:'Total planned hours',                 c:C.text},
-          {l:'Actual MH',     v:fmtH(mh.actual||0),      d:'Hours expended to date',              c:M.isHrLoaded?C.amber:C.muted2},
-          {l:'Remaining MH',  v:fmtH(mh.remaining||0),   d:'Hours still to be performed',         c:C.accent},
-          {l:'Earned MH',     v:fmtH(mh.earned||0),      d:'Budgeted × % complete',               c:C.green},
-          {l:'MH % Complete', v:`${mh.pctComplete||0}%`,  d:'Earned ÷ Budgeted',                  c:M.isHrLoaded?((mh.pctComplete||0)>=80?C.green:(mh.pctComplete||0)>=50?C.amber:C.red):C.muted2},
-          {l:'MH CPI',        v:(mh.CPI||0).toFixed(3),  d:'Productivity (Earned÷Actual)',         c:M.isHrLoaded?cpiCol(mh.CPI||0):C.muted2, warn:M.isHrLoaded&&(mh.CPI||0)<0.95},
-          {l:'MH SPI',        v:(mh.SPI||0).toFixed(3),  d:'Schedule perf (Earned÷Planned)',       c:M.isHrLoaded?((mh.SPI||0)>=1?C.green:(mh.SPI||0)>=0.9?C.amber:C.red):C.muted2, warn:M.isHrLoaded&&(mh.SPI||0)<0.9},
-          {l:'MH EAC',        v:fmtH(mh.EAC||0),         d:'Estimated hours at completion',       c:M.isHrLoaded?((mh.EAC||0)>(mh.budgeted||0)?C.red:C.green):C.muted2},
+          {l:'Budgeted MH',   v:resourceLoaded?fmtH(prod.budgetedHours):'Unavailable', d:'Total planned hours',           c:resourceLoaded?C.text:C.muted2},
+          {l:'Actual MH',     v:resourceLoaded?fmtH(prod.actualHours):'Unavailable',   d:'Hours expended to date',        c:resourceLoaded?C.amber:C.muted2},
+          {l:'Remaining MH',  v:resourceLoaded?fmtH(prod.remainingHours):'Unavailable',d:'Hours still to be performed',   c:resourceLoaded?C.accent:C.muted2},
+          {l:'Earned MH',     v:resourceLoaded?fmtH(prod.earnedHours):'Unavailable',   d:'Duration % Complete × Budgeted',c:resourceLoaded?C.green:C.muted2},
+          {l:'MH % Complete', v:pctComplete!=null?`${pctComplete}%`:'Unavailable',     d:'Earned ÷ Budgeted',             c:pctComplete==null?C.muted2:(pctComplete>=80?C.green:pctComplete>=50?C.amber:C.red)},
+          {l:'MH CPI',        v:M.authoritativeEvm?.hours?.cpi!=null?M.authoritativeEvm.hours.cpi.toFixed(3):'Unavailable',  d:'Productivity (Earned÷Actual)',         c:M.authoritativeEvm?.hours?.cpi==null?C.muted2:cpiCol(M.authoritativeEvm.hours.cpi), warn:M.authoritativeEvm?.hours?.cpi!=null&&M.authoritativeEvm.hours.cpi<0.95},
+          {l:'MH SPI',        v:M.authoritativeEvm?.hours?.spi!=null?M.authoritativeEvm.hours.spi.toFixed(3):'Unavailable',  d:'Schedule perf (Earned÷Planned)',       c:M.authoritativeEvm?.hours?.spi==null?C.muted2:(M.authoritativeEvm.hours.spi>=1?C.green:M.authoritativeEvm.hours.spi>=0.9?C.amber:C.red), warn:M.authoritativeEvm?.hours?.spi!=null&&M.authoritativeEvm.hours.spi<0.9},
+          {l:'MH EAC',        v:(()=>{const s=M.authoritativeEvm?.hoursForecast?.scenarios?.[0];return s?fmtH(s.eac):'Unavailable';})(),  d:'Estimated hours at completion',       c:C.muted2},
         ].map((k:any,i)=><KPI key={i} label={k.l} value={k.v} sub={k.d} color={k.c} warn={k.warn}/>)}
       </div>
 
@@ -1350,7 +1408,7 @@ function HistogramView({M,allActivities}:any){
             ))}
           </tr></thead>
           <tbody>{(M.projects||[]).filter((p:any)=>p.bgtHrs>0).map((p:any)=>{
-            const pCpi=p.actHrs>0?p.ernHrs/p.actHrs:1.0;
+            const pCpi=M.authoritativeEvmByProject?.[p.id]?.hours?.cpi;
             return(<tr key={p.id} style={{borderTop:`1px solid ${C.border}`}}>
               <td style={{padding:'9px 12px',color:C.text,fontWeight:600}}>{p.name}</td>
               <td style={{padding:'9px 12px',color:C.text,     fontFamily:"'DM Mono',monospace"}}>{fmtH(p.bgtHrs)}</td>
@@ -1363,133 +1421,37 @@ function HistogramView({M,allActivities}:any){
                   <span style={{color:'#111111',fontSize:11}}>{(p.mhPct||0).toFixed(1)}%</span>
                 </div>
               </td>
-              <td style={{padding:'9px 12px',color:cpiCol(pCpi),fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{pCpi.toFixed(3)}</td>
+              <td style={{padding:'9px 12px',color:pCpi==null?C.muted2:cpiCol(pCpi),fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{pCpi!=null?pCpi.toFixed(3):'Unavailable'}</td>
             </tr>);
           })}</tbody>
         </table>
       </div>}
     </Sec>
+      );
+    })()}
   </>);
 }
 
-function CriticalView({M,allActivities,onUpdateActivity,activityUpdates}:any){
-  const [editingAct,setEditingAct]=useState<any>(null);
-  const [page,setPage]=useState(0);
-  const [projFilter,setProjFilter]=useState("ALL");
-  const [floatFilter,setFloatFilter]=useState("ALL");
+function CriticalView({allActivities}:any){
+  // The float-bucket KPIs, distribution charts and sortable float table that
+  // used to live here were a straight duplicate of Float Analysis (which
+  // reads the same activity_analysis.py rows and additionally tracks
+  // Previous-vs-Current float change) — moved there per the Phase 1
+  // consolidation. Path Tracing below is genuine path/network analysis
+  // (driving-predecessor chain, not a CPM recompute) and stays here.
   const [nearCritDays,setNearCritDays]=useState(5);
-  const [sortCol,setSortCol]=useState<string>("float");
-  const [sortDir,setSortDir]=useState<"asc"|"desc">("asc");
-  const PAGE=999999;
-
-  const COL_DEFS=[
-    {key:"#",       label:"#",            sort:null},
-    {key:"code",    label:"Code",         sort:"code"},
-    {key:"name",    label:"Activity Name",sort:"name"},
-    {key:"project", label:"Project",      sort:"project"},
-    {key:"wbs",     label:"WBS",          sort:"wbs"},
-    {key:"float",   label:"Total Float",  sort:"float"},
-    {key:"bStart",  label:"BL Start",     sort:"bStart"},
-    {key:"bFinish", label:"BL Finish",    sort:"bFinish"},
-    {key:"actStart",label:"Act Start",    sort:"actStart"},
-    {key:"pct",     label:"% Done",       sort:"pct"},
-  ];
-
-  const handleSort=(col:string)=>{
-    if(sortCol===col){setSortDir(d=>d==="asc"?"desc":"asc");}
-    else{setSortCol(col);setSortDir("asc");}
-    setPage(0);
-  };
-
-  // Near-critical count recomputed from allActivities whenever the threshold changes
-  const nearCritCount=useMemo(()=>
-    (allActivities||[]).filter((a:any)=>a.totalFloat!=null&&a.totalFloat>=1&&a.totalFloat<=nearCritDays).length,
-  [allActivities,nearCritDays]);
-
-  const kpis=[
-    {id:"ALL",  label:"Critical Activities",              value:M.critical,    color:C.red,   warn:true},
-    {id:"NEG",  label:"Negative Float",                   value:M.fb.negative, color:C.red,   warn:M.fb.negative>0},
-    {id:"ZERO", label:"Zero Float",                       value:M.fb.zero,     color:C.amber, warn:false},
-    {id:"NEAR", label:`Near-Critical 1–${nearCritDays}d`, value:nearCritCount, color:C.amber, warn:false},
-    {id:"LOW",  label:`Low Float ${nearCritDays+1}–15d`,  value:M.fb.medium,   color:C.green, warn:false},
-    {id:"HIGH", label:"High Float >15d",                  value:M.fb.high,     color:C.green, warn:false},
-  ];
-
-  const filterLabels:any={
-    ALL:"All Critical Activities",
-    NEG:"Negative Float Activities",
-    ZERO:"Zero Float Activities",
-    NEAR:`Near-Critical Activities (1–${nearCritDays}d)`,
-    LOW:`Low Float Activities (${nearCritDays+1}–15d)`,
-    HIGH:"High Float Activities (>15d)",
-  };
-
-  const sourceActs:any[]=useMemo(()=>{
-    const pool=(allActivities||[]);
-    switch(floatFilter){
-      case "NEG":  return pool.filter((a:any)=>a.totalFloat!=null&&a.totalFloat<0);
-      case "ZERO": return pool.filter((a:any)=>a.totalFloat!=null&&a.totalFloat===0);
-      case "NEAR": return pool.filter((a:any)=>a.totalFloat!=null&&a.totalFloat>=1&&a.totalFloat<=nearCritDays);
-      case "LOW":  return pool.filter((a:any)=>a.totalFloat!=null&&a.totalFloat>nearCritDays&&a.totalFloat<=15);
-      case "HIGH": return pool.filter((a:any)=>a.totalFloat!=null&&a.totalFloat>15);
-      default:     return M.criticalActs||[];
-    }
-  },[allActivities,M.criticalActs,floatFilter,nearCritDays]);
-
-  const allCritical:any[]=useMemo(()=>{
-    if(projFilter==="ALL")return sourceActs;
-    return sourceActs.filter((a:any)=>a.projectId===projFilter||a.projectName===projFilter);
-  },[sourceActs,projFilter]);
-
-  const sorted:any[]=useMemo(()=>{
-    const arr=[...allCritical];
-    const dir=sortDir==="asc"?1:-1;
-    arr.sort((a,b)=>{
-      let va:any,vb:any;
-      switch(sortCol){
-        case "code":    va=a.code||"";    vb=b.code||"";    break;
-        case "name":    va=a.name||"";    vb=b.name||"";    break;
-        case "project": va=(a.projectName||a.projectId||"").toLowerCase(); vb=(b.projectName||b.projectId||"").toLowerCase(); break;
-        case "wbs":     va=a.wbs||"";     vb=b.wbs||"";     break;
-        case "float":
-          if(a.totalFloat==null&&b.totalFloat==null)return 0;
-          if(a.totalFloat==null)return 1;   // completed activities sink to bottom
-          if(b.totalFloat==null)return -1;
-          va=a.totalFloat; vb=b.totalFloat; break;
-        case "bStart":   va=a.bStart  ?a.bStart.getTime()  :0; vb=b.bStart  ?b.bStart.getTime()  :0; break;
-        case "bFinish":  va=a.bFinish ?a.bFinish.getTime() :0; vb=b.bFinish ?b.bFinish.getTime() :0; break;
-        case "actStart": va=a.start   ?a.start.getTime()   :0; vb=b.start   ?b.start.getTime()   :0; break;
-        case "pct":      va=a.pctComplete||0; vb=b.pctComplete||0; break;
-        default: return 0;
-      }
-      if(typeof va==="string")return va.localeCompare(vb)*dir;
-      return(va-vb)*dir;
-    });
-    return arr;
-  },[allCritical,sortCol,sortDir]);
-
-  const floatColor=(f:number)=>f<0?C.red:f===0?C.amber:C.orange;
-  const floatBg=(f:number)=>f<0?'rgba(255,87,87,0.1)':f===0?'rgba(255,181,71,0.1)':'rgba(251,146,60,0.1)';
-  const floatLabel=(f:number)=>f<0?'NEG':f===0?'ZERO':'LOW';
-
-  const [expandedActId,setExpandedActId]=useState<string|null>(null);
-  const toggleAct=(id:string)=>setExpandedActId(p=>p===id?null:id);
   const actMap=useMemo(()=>{const m:Record<string,any>={};(allActivities||[]).forEach((a:any)=>{m[a.id]=a;});return m;},[allActivities]);
-  const navigateToAct=useCallback((actId:string)=>{
-    const idx=sorted.findIndex((a:any)=>(a.id||a.code)===actId);
-    if(idx>=0){setPage(Math.floor(idx/PAGE));setExpandedActId(actId);setTimeout(()=>document.querySelector(`[data-actid="${CSS.escape(actId)}"]`)?.scrollIntoView({behavior:"smooth",block:"center"}),60);}
-    else{setExpandedActId(actId);}
-  },[sorted]);
-
-  const {colW:cpColW,onResizeStart:cpResize,reset:cpReset}=useColResize({rank:44,code:96,name:230,project:130,wbs:120,float:90,bStart:100,bFinish:100,actStart:100,pct:96});
-  const CP_ALL_COLS:[string,string][]=[['rank','#'],['code','Code'],['name','Activity Name'],['project','Project'],['wbs','WBS'],['float','Float'],['bStart','BL Start'],['bFinish','BL Finish'],['actStart','Act Start'],['pct','% Done']];
-  const cpCols=useColOrder(CP_ALL_COLS);
-  const {visible:cpVisible,hidden:cpHidden}=cpCols;
 
   return(<>
-    <Sec title="Critical Path Summary" icon="🔴">
-      {/* Near-critical threshold control */}
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
+    <Sec title="Critical Path" icon="🔴">
+      <div style={{margin:"0 0 14px",padding:"10px 16px",borderRadius:10,background:`${C.accent}10`,border:`1px solid ${C.accent}30`,display:"flex",alignItems:"center",gap:10}}>
+        <span style={{fontSize:16}}>📊</span>
+        <div style={{fontSize:12,color:C.muted,lineHeight:1.5}}>
+          Float distribution, Negative/Zero Float KPIs and Critical % by Project moved to <strong style={{color:C.text}}>Float Analysis</strong> — same activity_analysis.py rows, plus Previous-vs-Current float-change tracking this page didn't have.
+        </div>
+      </div>
+      {/* Near-critical threshold control — used below by Path Tracing */}
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
         <span style={{fontSize:12,color:C.muted2}}>Near-critical threshold:</span>
         <div style={{display:"flex",alignItems:"center",gap:6,background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"5px 10px"}}>
           <span style={{fontSize:11,color:C.muted}}>Float</span>
@@ -1497,150 +1459,147 @@ function CriticalView({M,allActivities,onUpdateActivity,activityUpdates}:any){
           <input
             type="number" min={1} max={99}
             value={nearCritDays}
-            onChange={e=>{const v=Math.max(1,Math.min(99,parseInt(e.target.value)||1));setNearCritDays(v);setPage(0);}}
+            onChange={e=>{const v=Math.max(1,Math.min(99,parseInt(e.target.value)||1));setNearCritDays(v);}}
             style={{width:44,background:"transparent",border:`1px solid ${C.border}`,color:C.amber,borderRadius:5,padding:"2px 6px",fontSize:13,fontFamily:"'DM Mono',monospace",fontWeight:700,textAlign:"center",outline:"none"}}
           />
           <span style={{fontSize:12,color:C.muted2}}>days</span>
         </div>
-        <span style={{fontSize:11,color:C.muted}}>Activities with float between 1 and {nearCritDays} days are near-critical</span>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(145px,1fr))",gap:9,marginBottom:18}}>
-        {kpis.map(k=>(
-          <KPI key={k.id} label={k.label} value={k.value} color={k.color} warn={k.warn}
-            active={floatFilter===k.id}
-            onClick={()=>{setFloatFilter(k.id);setPage(0);}}
-          />
-        ))}
-      </div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:12,marginBottom:18}}>
-        <CC title="Float Risk Profile" flex="1 1 280px" height={220}>
-          <ResponsiveContainer><BarChart data={M.floatHist} margin={{left:-10}}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
-            <XAxis dataKey="range" tick={{fill:C.muted,fontSize:12}}/>
-            <YAxis tick={{fill:C.muted,fontSize:11}}/>
-            <Tooltip content={<TT/>}/>
-            <Bar dataKey="count" name="Activities" radius={[4,4,0,0]}>{M.floatHist.map((e:any,i:number)=><Cell key={i} fill={e.fill}/>)}</Bar>
-          </BarChart></ResponsiveContainer>
-        </CC>
-        <CC title="Critical % by Project" flex="1 1 280px" height={220}>
-          <ResponsiveContainer><BarChart data={M.projects.map((p:any)=>({name:p.name.split(" ").slice(0,2).join(" "),criticalPct:Math.round((p.critical/p.total)*100)}))} margin={{left:-10}}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.border}/>
-            <XAxis dataKey="name" tick={{fill:C.muted,fontSize:10}}/>
-            <YAxis tick={{fill:C.muted,fontSize:11}} unit="%"/>
-            <Tooltip content={<TT/>}/>
-            <ReferenceLine y={10} stroke={C.amber} strokeDasharray="4 4"/>
-            <Bar dataKey="criticalPct" name="Critical %" fill={C.red} radius={[4,4,0,0]}/>
-          </BarChart></ResponsiveContainer>
-        </CC>
+        <span style={{fontSize:11,color:C.muted}}>Activities with float between 1 and {nearCritDays} days are near-critical in the chain below</span>
       </div>
     </Sec>
 
-    <Sec title={`${filterLabels[floatFilter]} (${allCritical.length})`} icon="🔴">
-      {/* Filters */}
-      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
-        <select value={projFilter} onChange={e=>{setProjFilter(e.target.value);setPage(0);}}
-          style={{background:C.card,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"7px 11px",fontSize:13,fontFamily:"inherit",cursor:"pointer"}}>
-          <option value="ALL">All Projects</option>
-          {M.projects.map((p:any)=><option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
+    <PathTracePanel allActivities={allActivities} actMap={actMap} nearCritDays={nearCritDays}/>
+  </>);
+}
+
+// ─── PATH TRACING (Phase 5) ────────────────────────────────────────────────────
+// pickDrivingRel/tracePath now live in pathTrace.ts (shared with GanttView.tsx's
+// activity detail drawer) — see that file for the "driving neighbour" heuristic
+// and why it is explicitly not a recalculated CPM.
+function PathTracePanel({allActivities,actMap,nearCritDays}:any){
+  const [query,setQuery]=useState("");
+  const [selectedId,setSelectedId]=useState<string|null>(null);
+  const [direction,setDirection]=useState<"predecessors"|"successors">("predecessors");
+  const [preset,setPreset]=useState<"any"|"milestones"|"negFloat">("any");
+
+  const candidates=useMemo(()=>{
+    const pool=(allActivities||[]);
+    const filtered = preset==="milestones" ? pool.filter((a:any)=>a.isMilestone)
+      : preset==="negFloat" ? pool.filter((a:any)=>a.totalFloat!=null&&a.totalFloat<0)
+      : pool;
+    if(!query.trim())return filtered.slice(0,25);
+    const q=query.toLowerCase();
+    return filtered.filter((a:any)=>(a.code||"").toLowerCase().includes(q)||(a.name||"").toLowerCase().includes(q)).slice(0,25);
+  },[allActivities,query,preset]);
+
+  const chain=useMemo(()=>{
+    if(!selectedId)return [];
+    return tracePath(selectedId, direction, actMap);
+  },[selectedId,direction,actMap]);
+
+  const fmtD=(d:any)=>{
+    if(!d)return "—";
+    const dt=d instanceof Date?d:new Date(d);
+    return isNaN(dt.getTime())?"—":dt.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+  };
+
+  return(
+    <Sec title="Path Tracing" icon="🔗">
+      <div style={{fontSize:12,color:C.muted2,marginBottom:14,lineHeight:1.6}}>
+        Relationship trace using each activity's imported total float to pick the driving
+        neighbour at every step — <strong>not</strong> a recalculated CPM. (A CPM recalculation
+        only happens when you edit schedule logic — see the "Schedule logic edited" banner.)
+      </div>
+
+      <div style={{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center",marginBottom:14}}>
         <div style={{display:"flex",gap:6}}>
-          {[{label:"Negative Float",color:C.red},{label:"Zero Float",color:C.amber},{label:"Low Float",color:C.orange}].map((badge,i)=>(
-            <span key={i} style={{fontSize:11,padding:"3px 9px",borderRadius:12,background:`${badge.color}15`,color:badge.color,fontWeight:600,border:`1px solid ${badge.color}30`}}>{badge.label}</span>
+          {[{id:"any",label:"Any Activity"},{id:"milestones",label:"Milestones"},{id:"negFloat",label:"Negative Float"}].map(p=>(
+            <button key={p.id} onClick={()=>{setPreset(p.id as any);setSelectedId(null);setQuery("");}}
+              style={{background:preset===p.id?`${C.accent}18`:C.card,border:`1px solid ${preset===p.id?C.accent:C.border}`,color:preset===p.id?C.accent:C.muted2,borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600}}>
+              {p.label}
+            </button>
           ))}
         </div>
-        <span style={{color:C.muted2,fontSize:12,marginLeft:"auto"}}>
-          {sorted.length.toLocaleString()} activities · Page {page+1} of {Math.ceil(sorted.length/PAGE)||1}
-        </span>
-        {(()=>{
-          const cpCell=(a:any,k:string)=>{switch(k){case'rank':return String(sorted.indexOf(a)+1);case'code':return a.code||'';case'name':return a.name||'';case'project':return a.projectName||a.projectId||'';case'wbs':return a.wbs||'';case'float':{const f=a.adjustedFloat??a.totalFloat;return f==null?'Done':`${f}d`;}case'bStart':return fmtDateExport(a.bStart);case'bFinish':return fmtDateExport(a.bFinish);case'actStart':return fmtDateExport(a.start);case'pct':return`${a.pctComplete||0}%`;default:return'';}};
-          const title=`Critical Activities — ${filterLabels[floatFilter]}`;
-          return(<>
-            <button type="button" onClick={()=>printTable(sorted,cpVisible,title,'critical-activities',cpCell)} style={{background:`${C.accent}14`,border:`1px solid ${C.accent}40`,color:C.accent,borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>🖨 PDF</button>
-            <button type="button" onClick={()=>downloadCSV(sorted,cpVisible,'critical-activities',cpCell)} style={{background:`${C.green}14`,border:`1px solid ${C.green}40`,color:C.green,borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",marginLeft:6}}>📊 Excel</button>
-          </>);
-        })()}
-        <ColPickerDialog allCols={CP_ALL_COLS} cols={cpCols}/>
+        <div style={{display:"flex",gap:6,marginLeft:"auto"}}>
+          {[{id:"predecessors",label:"↑ Trace Predecessors"},{id:"successors",label:"↓ Trace Successors"}].map(d=>(
+            <button key={d.id} onClick={()=>setDirection(d.id as any)}
+              style={{background:direction===d.id?C.accent:C.card,border:`1px solid ${direction===d.id?C.accent:C.border}`,color:direction===d.id?"#fff":C.muted2,borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:600}}>
+              {d.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {editingAct&&onUpdateActivity&&<ActivityEditModal act={editingAct} onSave={onUpdateActivity} onClose={()=>setEditingAct(null)}/>}
-      <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"auto",maxHeight:560}}>
-        <div style={{display:"flex",justifyContent:"flex-end",padding:"4px 8px 0"}}><button onClick={cpReset} title="Reset column widths" style={{background:"transparent",border:"none",color:C.muted2,cursor:"pointer",fontSize:11,padding:"2px 6px"}}>↔ Reset</button></div>
-        <table style={{tableLayout:"fixed",borderCollapse:"collapse",fontSize:12,width:cpVisible.reduce((s,[k])=>s+(cpColW[k]||0),0)+36}}>
-          <colgroup><col style={{width:36}}/>{cpVisible.map(([k])=><col key={k} style={{width:cpColW[k]}}/>)}</colgroup>
-          <thead style={{position:"sticky",top:0,zIndex:1,background:C.card}}>
-            <tr style={{background:"rgba(255,87,87,0.07)"}}>
-              <th style={{width:36,padding:"8px 4px"}}></th>
-              {COL_DEFS.map((col,ci)=>{
-                const ck=["rank","code","name","project","wbs","float","bStart","bFinish","actStart","pct"][ci];
-                if(cpHidden.has(ck))return null;
-                const active=!!(col.sort&&sortCol===col.sort);
-                return(
-                  <RTh key={col.key} colKey={ck} label={col.label} colW={cpColW} onResizeStart={cpResize}
-                    onSort={col.sort?()=>handleSort(col.sort!):undefined}
-                    sortActive={active} sortDir={active?sortDir:undefined}/>
-                );
-              })}
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.slice(page*PAGE,(page+1)*PAGE).map((a:any,i:number)=>{
-              const rank=page*PAGE+i+1;
-              const f=a.totalFloat;
-              const bf=a.bFinish?new Date(a.bFinish):null;
-              const bs=a.bStart?new Date(a.bStart):null;
-              const as_=a.start?new Date(a.start):null;
-              const actId=a.id||a.code;
-              const isExp=expandedActId===actId;
-              const isEdited=!!(activityUpdates?.[actId]?._edited);
-              const td:React.CSSProperties={padding:"7px 12px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"};
-              return(<Fragment key={actId}>
-                <tr data-actid={actId} onClick={()=>toggleAct(actId)} style={{borderTop:`1px solid ${C.border}`,cursor:"pointer",background:isExp?`${C.accent}0a`:isEdited?`${C.amber}07`:f==null?"transparent":f<0?"rgba(255,87,87,0.04)":f===0?"rgba(255,181,71,0.03)":"transparent"}} title="Click to view predecessors & successors">
-                  <td style={{padding:"0 4px",textAlign:"center",width:36}} onClick={e=>e.stopPropagation()}>
-                    {onUpdateActivity&&<button onClick={()=>setEditingAct(a)} title="Update activity" style={{background:isEdited?`${C.amber}20`:"transparent",border:`1px solid ${isEdited?C.amber:C.border}`,color:isEdited?C.amber:C.muted2,borderRadius:5,padding:"2px 5px",cursor:"pointer",fontSize:12,lineHeight:1}}>✎</button>}
-                  </td>
-                  {!cpHidden.has('rank')&&<td style={{...td,color:C.muted,fontSize:10,fontFamily:"'DM Mono',monospace"}}>{rank}</td>}
-                  {!cpHidden.has('code')&&<td style={{...td,color:'#111111',fontFamily:"'DM Mono',monospace",fontSize:10}}>{a.code}</td>}
-                  {!cpHidden.has('name')&&<td style={{...td}} title={a.name}><span style={{color:'#111111'}}>{a.name}</span></td>}
-                  {!cpHidden.has('project')&&<td style={{...td,color:'#111111',fontSize:11}} title={a.projectName||a.projectId}>{a.projectName||a.projectId}</td>}
-                  {!cpHidden.has('wbs')&&<td style={{...td,color:'#111111',fontSize:11}} title={a.wbs||""}>{a.wbs||"—"}</td>}
-                  {!cpHidden.has('float')&&<td style={{...td}}>
+      <div style={{position:"relative",marginBottom:16}}>
+        <input
+          value={selectedId ? `${actMap[selectedId]?.code} — ${actMap[selectedId]?.name}` : query}
+          onChange={e=>{setQuery(e.target.value);setSelectedId(null);}}
+          placeholder={preset==="milestones"?"Search milestones…":preset==="negFloat"?"Search negative-float activities…":"Search activity ID or name…"}
+          style={{width:"100%",maxWidth:480,background:C.card,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 12px",fontSize:13,fontFamily:"inherit",color:C.text}}
+        />
+        {!selectedId&&query.trim()&&candidates.length>0&&(
+          <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,width:"100%",maxWidth:480,background:C.panel,border:`1px solid ${C.border}`,borderRadius:8,boxShadow:"0 8px 24px rgba(0,0,0,0.15)",zIndex:50,maxHeight:260,overflowY:"auto"}}>
+            {candidates.map((a:any)=>(
+              <div key={a.id||a.code} onClick={()=>{setSelectedId(a.id||a.code);setQuery("");}}
+                style={{padding:"7px 12px",cursor:"pointer",fontSize:12,borderBottom:`1px solid ${C.border}`}}
+                onMouseEnter={e=>(e.currentTarget as HTMLElement).style.background=C.card}
+                onMouseLeave={e=>(e.currentTarget as HTMLElement).style.background="transparent"}
+              >
+                <span style={{fontFamily:"monospace",color:C.accent}}>{a.code}</span> — {a.name}
+                {a.totalFloat!=null&&<span style={{marginLeft:8,color:a.totalFloat<0?C.red:C.muted2}}>({a.totalFloat}d float)</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {!selectedId && <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:"20px 0"}}>Select an activity or milestone above to trace its driving chain.</div>}
+
+      {selectedId && chain.length===0 && <div style={{color:C.muted,fontSize:13}}>No {direction} found for this activity.</div>}
+
+      {selectedId && chain.length>0 && (
+        <div style={{display:"flex",flexDirection:"column",gap:0}}>
+          {chain.map((node:any,idx:number)=>{
+            const a=node.activity;
+            const f=a.totalFloat;
+            const isNearCrit=f!=null&&f>=1&&f<=nearCritDays;
+            const isCrit=f!=null&&f<=0;
+            const borderColor=isCrit?C.red:isNearCrit?C.amber:C.border;
+            return(
+              <div key={a.id||a.code}>
+                {idx>0&&(
+                  <div style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0 4px 24px",color:C.muted2,fontSize:11}}>
+                    <span style={{fontSize:14}}>↓</span>
+                    <span style={{fontFamily:"monospace",fontWeight:700}}>{node.relFromPrev?.relType||"FS"}</span>
+                    {!!(node.relFromPrev?.lagDays)&&<span>lag {node.relFromPrev.lagDays}d</span>}
+                  </div>
+                )}
+                <div onClick={()=>{setSelectedId(a.id||a.code);setQuery("");}}
+                  style={{display:"flex",alignItems:"center",gap:14,background:C.card,border:`1px solid ${borderColor}`,borderLeft:`4px solid ${borderColor}`,borderRadius:8,padding:"10px 14px",cursor:"pointer"}}
+                  title="Click to re-trace the driving chain from this activity"
+                >
+                  <div style={{minWidth:90,fontFamily:"monospace",fontSize:12,color:C.accent,fontWeight:700}}>{a.code}</div>
+                  <div style={{flex:"1 1 220px",minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.name}</div>
+                    <div style={{fontSize:11,color:C.muted2}}>
+                      {a.wbs||"—"}{a.area?` · Area ${a.area}`:""}{a.discipline?` · ${a.discipline}`:""}{a.contractor?` · ${a.contractor}`:""}
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:C.muted2,minWidth:170,textAlign:"right"}}>{fmtD(a.bStart)} → {fmtD(a.bFinish)}</div>
+                  <div style={{minWidth:60,textAlign:"right"}}>
                     {f==null
-                      ? <span style={{background:`${C.green}15`,color:C.green,fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:5}}>DONE</span>
-                      : <span style={{background:floatBg(f),color:floatColor(f),fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:5,display:"inline-flex",alignItems:"center",gap:5}}>
-                          <span style={{fontSize:9}}>{floatLabel(f)}</span> {f}d
-                        </span>
+                      ?<span style={{background:`${C.green}15`,color:C.green,fontFamily:"monospace",fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:5}}>DONE</span>
+                      :<span style={{background:isCrit?"rgba(255,87,87,0.1)":isNearCrit?"rgba(255,181,71,0.1)":"transparent",color:isCrit?C.red:isNearCrit?C.amber:C.muted2,fontFamily:"monospace",fontWeight:700,fontSize:11,padding:"2px 8px",borderRadius:5}}>{f}d</span>
                     }
-                  </td>}
-                  {!cpHidden.has('bStart')&&<td style={{...td,color:'#111111',fontSize:11}}>{fmtDate(bs)}</td>}
-                  {!cpHidden.has('bFinish')&&<td style={{...td,color:bf&&bf<new Date()&&(a.pctComplete||0)<100?C.amber:C.muted2,fontSize:11}}>{fmtDate(bf)}</td>}
-                  {!cpHidden.has('actStart')&&<td style={{...td,color:'#111111',fontSize:11}}>{fmtDate(as_)||"—"}</td>}
-                  {!cpHidden.has('pct')&&<td style={{...td}}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{flex:1,background:C.border,borderRadius:3,height:4}}><div style={{width:`${a.pctComplete||0}%`,background:a.pctComplete>=100?C.green:C.accent,borderRadius:3,height:4}}/></div><span style={{color:C.muted2,fontSize:10,minWidth:28}}>{a.pctComplete||0}%</span></div></td>}
-                </tr>
-                {isExp&&<LogicPanel a={a} actMap={actMap} colSpan={cpVisible.length+1} onNavigate={navigateToAct}/>}
-              </Fragment>);
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination */}
-      {sorted.length>PAGE&&(
-        <div style={{display:"flex",gap:8,justifyContent:"center",marginTop:10,alignItems:"center",flexWrap:"wrap"}}>
-          <button onClick={()=>setPage(0)} disabled={page===0}
-            style={{background:C.card,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:12}}>⟨⟨ First</button>
-          <button onClick={()=>setPage(p=>Math.max(0,p-1))} disabled={page===0}
-            style={{background:C.card,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"5px 13px",cursor:"pointer",fontSize:12}}>← Prev</button>
-          <span style={{color:C.muted2,fontSize:12}}>
-            Page <strong style={{color:C.text}}>{page+1}</strong> of {Math.ceil(sorted.length/PAGE)} &nbsp;·&nbsp; showing {page*PAGE+1}–{Math.min((page+1)*PAGE,sorted.length)} of {sorted.length.toLocaleString()}
-          </span>
-          <button onClick={()=>setPage(p=>Math.min(Math.ceil(sorted.length/PAGE)-1,p+1))} disabled={(page+1)*PAGE>=sorted.length}
-            style={{background:C.card,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"5px 13px",cursor:"pointer",fontSize:12}}>Next →</button>
-          <button onClick={()=>setPage(Math.ceil(sorted.length/PAGE)-1)} disabled={(page+1)*PAGE>=sorted.length}
-            style={{background:C.card,border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:12}}>Last ⟩⟩</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </Sec>
-  </>);
+  );
 }
 
 function ComparisonView({M,files}:any){
@@ -1791,6 +1750,9 @@ function ActivityRegister({allActivities,projects,initialSearch="",onSearchChang
   const toggleAct=(id:string)=>setExpandedActId(p=>p===id?null:id);
   const [editingAct,setEditingAct]=useState<any>(null);
   const actMap=useMemo(()=>{const m:Record<string,any>={};(allActivities||[]).forEach((a:any)=>{m[a.id]=a;});return m;},[allActivities]);
+  // OVERDUE filter below compares against the active schedule's own
+  // effective Data Date — never today's date.
+  const ddParsed=parseDate(dataDate);
 
   // Column resize
   type CK='code'|'name'|'project'|'bStart'|'bFinish'|'fcStart'|'fcFinish'|'sv'|'fv'|'dur'|'float'|'pct'|'status';
@@ -1864,7 +1826,7 @@ function ActivityRegister({allActivities,projects,initialSearch="",onSearchChang
     if(proj!=="ALL")         a=a.filter((x:any)=>x.projectId===proj);
     if(search)               a=a.filter((x:any)=>x.name.toLowerCase().includes(search.toLowerCase())||x.code.toLowerCase().includes(search.toLowerCase()));
     if(filt==="CRITICAL")    a=a.filter((x:any)=>x.isCritical&&!x.isMilestone);
-    if(filt==="OVERDUE")     a=a.filter((x:any)=>x.bFinish&&x.bFinish<new Date()&&(x.pctComplete||0)<100);
+    if(filt==="OVERDUE")     a=a.filter((x:any)=>x.bFinish&&ddParsed&&x.bFinish<ddParsed&&(x.pctComplete||0)<100);
     if(filt==="NOTSTART")    a=a.filter((x:any)=>!x.start&&(x.pctComplete||0)<100);
     if(filt==="NEGFLOAT")    a=a.filter((x:any)=>x.totalFloat!=null&&x.totalFloat<0);
     if(filt==="COMPLETE")    a=a.filter((x:any)=>(x.pctComplete||0)>=100||x.totalFloat==null||x.status==="TK_Complete");
@@ -1873,7 +1835,7 @@ function ActivityRegister({allActivities,projects,initialSearch="",onSearchChang
     if(filt==="NEARCRIT")   a=a.filter((x:any)=>x.totalFloat!=null&&x.totalFloat>=1&&x.totalFloat<=5);
     if(epcFilt!=='ALL')     a=a.filter((x:any)=>getEpcPhase(x.wbs||'',x.wbsPath||'').key===epcFilt);
     return a;
-  },[allActivities,search,proj,filt,epcFilt]);
+  },[allActivities,search,proj,filt,epcFilt,dataDate]);
 
   // Group by full wbsPath (preserves P6 hierarchy, not just leaf name)
   const wbsGroups=useMemo(()=>{
@@ -2078,7 +2040,10 @@ function ActivityRegister({allActivities,projects,initialSearch="",onSearchChang
   // and flat render paths below so a single {arVisible.map(...)} drives column
   // order/visibility in both — keeping header, body and column-picker in sync.
   const computeRowDerived=(a:any)=>{
-    const today=new Date();
+    // "today" here is the active schedule's own effective Data Date (never
+    // the real-world date) — used below for the "should have finished"
+    // amber flag on the Baseline Finish column.
+    const today=ddParsed;
     const bf=a.bFinish?new Date(a.bFinish):null,af=a.finish?new Date(a.finish):null;
     const bs=a.bStart?new Date(a.bStart):null,as_=a.start?new Date(a.start):null;
     const isComp=(a.pctComplete||0)>=100;
@@ -2097,7 +2062,7 @@ function ActivityRegister({allActivities,projects,initialSearch="",onSearchChang
       case'name':return <td key={key} style={{...tdBase}} title={a.name}>{a.isCritical&&!a.isMilestone&&<span style={{color:C.red,marginRight:3,fontSize:9}}>●</span>}{a.isMilestone&&<span style={{color:C.purple,marginRight:3,fontSize:9}}>◆</span>}<span style={{color:'#111111'}}>{a.name}</span></td>;
       case'project':return <td key={key} style={{...tdBase,color:'#111111',fontSize:11}} title={a.projectName||a.projectId}>{a.projectName||a.projectId}</td>;
       case'bStart':return <td key={key} style={{...tdBase,color:'#111111',fontSize:11}}>{fmtDate(bs)}</td>;
-      case'bFinish':return <td key={key} style={{...tdBase,color:bf&&bf<today&&(a.pctComplete||0)<100?C.amber:'#111111',fontSize:11}}>{fmtDate(bf)}</td>;
+      case'bFinish':return <td key={key} style={{...tdBase,color:bf&&today&&bf<today&&(a.pctComplete||0)<100?C.amber:'#111111',fontSize:11}}>{fmtDate(bf)}</td>;
       case'fcStart':return <td key={key} style={{...tdBase,fontSize:11,color:fcS&&bs?fcS<bs?C.green:fcS>bs?C.amber:'#111111':'#111111'}}>{fmtDate(fcS)}</td>;
       case'fcFinish':return <td key={key} style={{...tdBase,fontSize:11,fontWeight:fcF&&bf&&fcF>bf?600:400,color:fcF&&bf?fcF<bf?C.green:fcF>bf?C.red:'#111111':'#111111'}}>{fmtDate(fcF)}</td>;
       case'sv':return <td key={key} style={{...tdBase,color:arVarC(sv),fontFamily:"'DM Mono',monospace",fontWeight:sv&&sv>0?700:400,textAlign:"right"}}>{arFmtV(sv)}</td>;
@@ -2384,8 +2349,14 @@ function ScheduleDiff({files}:any){
     const earnA=actsA.reduce((s:number,a:any)=>s+(a.dur||0)*((a.pctComplete||0)/100),0),earnB=actsB.reduce((s:number,a:any)=>s+(a.dur||0)*((a.pctComplete||0)/100),0);
     const pctA=durA>0?(earnA/durA)*100:0,pctB=durB>0?(earnB/durB)*100:0;
     const negA=actsA.filter((a:any)=>a.totalFloat<0).length,negB=actsB.filter((a:any)=>a.totalFloat<0).length;
-    const overdueA=actsA.filter((a:any)=>{const f=a.bFinish||a.finish;return f&&f<new Date()&&a.pctComplete<100&&!a.isMilestone;}).length;
-    const overdueB=actsB.filter((a:any)=>{const f=a.bFinish||a.finish;return f&&f<new Date()&&a.pctComplete<100&&!a.isMilestone;}).length;
+    // "Overdue" = should-have-finished, evaluated against EACH slot's own
+    // effective Data Date — never today's date, and never one slot's date
+    // applied to the other. Unavailable (not zero) when a slot has no
+    // detected/confirmed Data Date (e.g. a raw upload here that never went
+    // through Import Preview).
+    const ddA=parseDate(slotA.dataDate),ddB=parseDate(slotB.dataDate);
+    const overdueA=ddA?actsA.filter((a:any)=>{const f=a.bFinish||a.finish;return f&&f<ddA&&a.pctComplete<100&&!a.isMilestone;}).length:null;
+    const overdueB=ddB?actsB.filter((a:any)=>{const f=a.bFinish||a.finish;return f&&f<ddB&&a.pctComplete<100&&!a.isMilestone;}).length:null;
     const compA=actsA.filter((a:any)=>a.pctComplete>=100).length,compB=actsB.filter((a:any)=>a.pctComplete>=100).length;
     const delayBuckets:any={"Advance >14d":0,"Advance 1-14d":0,"No Change":0,"Delay 1-14d":0,"Delay 15-30d":0,"Delay >30d":0};
     changed.forEach(c=>{const fd=c.changes.find((x:any)=>x.field==="Finish Date");if(!fd){delayBuckets["No Change"]++;return;}const d=fd.daysDiff;if(d<-14)delayBuckets["Advance >14d"]++;else if(d<0)delayBuckets["Advance 1-14d"]++;else if(d===0)delayBuckets["No Change"]++;else if(d<=14)delayBuckets["Delay 1-14d"]++;else if(d<=30)delayBuckets["Delay 15-30d"]++;else delayBuckets["Delay >30d"]++;});
@@ -2462,7 +2433,7 @@ function ScheduleDiff({files}:any){
             </div>
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:"hidden",marginBottom:8}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",background:"rgba(0,200,240,0.04)"}}>{["Metric","Version A","Version B","Delta","Direction"].map(h=><div key={h} style={{padding:"10px 14px",fontSize:10,fontWeight:600,color:C.muted,textTransform:"uppercase",letterSpacing:"0.06em"}}>{h}</div>)}</div>
-              {[{label:"Total Activities",a:diff.totalA,b:diff.totalB,invertGood:false},{label:"% Complete (SPC)",a:diff.pctA.toFixed(1)+"%",b:diff.pctB.toFixed(1)+"%",delta:parseFloat((diff.pctB-diff.pctA).toFixed(1)),unit:"%",invertGood:false},{label:"Critical Activities",a:diff.critA,b:diff.critB,delta:diff.critB-diff.critA,invertGood:true},{label:"Negative Float",a:diff.negA,b:diff.negB,delta:diff.negB-diff.negA,invertGood:true},{label:"Overdue Activities",a:diff.overdueA,b:diff.overdueB,delta:diff.overdueB-diff.overdueA,invertGood:true},{label:"Completed Activities",a:diff.compA,b:diff.compB,delta:diff.compB-diff.compA,invertGood:false}].map((r:any,i)=>{
+              {[{label:"Total Activities",a:diff.totalA,b:diff.totalB,invertGood:false},{label:"% Complete (SPC)",a:diff.pctA.toFixed(1)+"%",b:diff.pctB.toFixed(1)+"%",delta:parseFloat((diff.pctB-diff.pctA).toFixed(1)),unit:"%",invertGood:false},{label:"Critical Activities",a:diff.critA,b:diff.critB,delta:diff.critB-diff.critA,invertGood:true},{label:"Negative Float",a:diff.negA,b:diff.negB,delta:diff.negB-diff.negA,invertGood:true},{label:"Overdue Activities",a:diff.overdueA??"Unavailable",b:diff.overdueB??"Unavailable",invertGood:true},{label:"Completed Activities",a:diff.compA,b:diff.compB,delta:diff.compB-diff.compA,invertGood:false}].map((r:any,i)=>{
                 const delta=r.delta!==undefined?r.delta:typeof r.a==="number"&&typeof r.b==="number"?r.b-r.a:null;
                 const dir=delta===null||delta===0?"—":delta>0?r.invertGood?"↑ Worse":"↑ Better":r.invertGood?"↓ Better":"↓ Worse";
                 const dirColor=delta===0||delta===null?C.muted2:delta>0?(r.invertGood?C.red:C.green):(r.invertGood?C.green:C.red);
@@ -2680,13 +2651,27 @@ function VarianceView({M,allActivities}:any){
 }
 
 // ─── EVM VIEW ─────────────────────────────────────────────────────────────────
+// EVM figures below come from the authoritative cost_engine.py (same engine
+// as the Project Controls tab), computed on this session's activities by
+// /api/metrics/'s `authoritativeEvm`/`authoritativeEvmByProject` fields —
+// NOT from the legacy M.evm/M.manHours block, which can default CPI to 1.0
+// or use activity duration as a dollar proxy when a schedule isn't actually
+// cost-loaded. M.evm/M.manHours are left computing untouched for any other
+// consumer, but this view no longer reads their EVM index/forecast fields.
 function EVMView({M}:any){
-  const evm=M.evm||{};
-  const mh=M.manHours||{};
+  const mh=M.manHours||{};   // still used below for the honest raw MH curve/histogram (not its CPI/EAC fields)
+  const aevm=M.authoritativeEvm||{};
+  const cost=aevm.cost||{};
+  const hours=aevm.hours||{};
+  const forecastScenarios=aevm.forecast?.scenarios||[];
+  const hoursForecastScenarios=aevm.hoursForecast?.scenarios||[];
+  const primaryForecast=forecastScenarios[0];
   const fmt$=(v:number)=>v>=1e6?`$${(v/1e6).toFixed(2)}M`:v>=1e3?`$${(v/1e3).toFixed(1)}K`:`$${v.toFixed(0)}`;
   const fmtH=(v:number)=>v>=1000?`${(v/1000).toFixed(1)}K h`:`${Math.round(v)} h`;
   const spiColor=(v:number)=>v>=0.95?C.green:v>=0.85?C.amber:C.red;
   const cpiColor=(v:number)=>v>=0.95?C.green:v>=0.85?C.amber:C.red;
+  const money=(v:number|null|undefined)=>v==null?'Unavailable':fmt$(v);
+  const idx=(v:number|null|undefined)=>v==null?'Unavailable':v.toFixed(3);
 
   return(<>
     {/* EVM KPIs */}
@@ -2698,41 +2683,45 @@ function EVMView({M}:any){
       {/* Cost-loaded: green success banner */}
       {M.evmDataQuality==='cost_loaded'&&<div style={{background:'rgba(0,229,160,0.07)',border:'1px solid rgba(0,229,160,0.25)',borderRadius:8,padding:'10px 14px',fontSize:12,color:C.green,marginBottom:14,display:'flex',alignItems:'center',gap:8}}>
         <span style={{fontSize:16}}>💰</span>
-        <span><strong>Cost loaded</strong> — BCWP, BCWS and ACWP are calculated from P6 budgeted cost (target_cost), actual cost (act_reg_cost + act_ot_cost) and remaining cost fields. All EVM indices are dollar-accurate.</span>
+        <span><strong>Cost loaded</strong> — EV, PV and AC are calculated from P6 budgeted cost (target_cost), actual cost (act_reg_cost + act_ot_cost) and remaining cost fields. All EVM indices are dollar-accurate.</span>
       </div>}
       {/* Resource-loaded (hours, no cost): amber info banner */}
       {M.evmDataQuality==='resource_loaded'&&<div style={{background:'rgba(255,193,7,0.07)',border:'1px solid rgba(255,193,7,0.25)',borderRadius:8,padding:'10px 14px',fontSize:12,color:C.amber,marginBottom:14,display:'flex',alignItems:'center',gap:8}}>
         <span style={{fontSize:16}}>⚙</span>
-        <span><strong>Resource loaded (man-hours)</strong> — Budgeted Units (target_qty), Actual Regular/OT Units and Remaining Units are loaded. EVM indices use hours as the budget unit — SPI and schedule variance are valid, but CPI and cost variance require a cost-loaded XER.</span>
+        <span><strong>Resource loaded (man-hours)</strong> — Budgeted Units (target_qty), Actual Regular/OT Units and Remaining Units are loaded. Hours-based EVM (below, "MH" tiles) is available; cost EVM requires a cost-loaded XER and shows <strong>Unavailable</strong> until one is imported.</span>
       </div>}
       {/* Duration-only: warning banner */}
       {M.evmDataQuality==='duration_only'&&<div style={{background:'rgba(212,168,67,0.07)',border:`1px solid ${C.gold}30`,borderRadius:8,padding:'10px 14px',fontSize:12,color:C.gold,marginBottom:14,display:'flex',alignItems:'center',gap:8}}>
         <span style={{fontSize:16}}>⚠</span>
-        <span><strong>Duration only</strong> — No TASKRSRC assignments found. EVM uses activity duration as a proxy budget. SPI is indicative only; CPI and cost metrics are not meaningful. For accurate EVM, upload a resource-loaded or cost-loaded XER from P6.</span>
+        <span><strong>Duration only</strong> — No TASKRSRC assignments found. Cost and hours EVM both show <strong>Unavailable</strong> below rather than a duration-derived proxy. For accurate EVM, upload a resource-loaded or cost-loaded XER from P6.</span>
       </div>}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(155px,1fr))',gap:9,marginBottom:18}}>
         {[
-          {l:'BAC',            v:fmt$(evm.BAC||0),    d:'Budget at Completion',       c:C.text},
-          {l:'BCWS (Planned)', v:fmt$(evm.BCWS||0),   d:'Budgeted Cost Work Scheduled',c:PLAN_COLOR},
-          {l:'BCWP (Earned)',  v:fmt$(evm.BCWP||0),   d:'Budgeted Cost Work Performed',c:C.green},
-          {l:'ACWP (Actual)',  v:fmt$(evm.ACWP||0),   d:'Actual Cost Work Performed',  c:M.isCostLoaded?C.amber:C.muted2},
-          {l:'EAC',            v:fmt$(evm.EAC||0),    d:'Estimate at Completion',      c:(evm.EAC||0)>(evm.BAC||0)?C.red:C.green},
-          {l:'ETC',            v:fmt$(evm.ETC||0),    d:'Estimate to Complete',        c:C.muted2},
-          {l:'VAC',            v:fmt$(evm.VAC||0),    d:'Variance at Completion',      c:(evm.VAC||0)<0?C.red:C.green},
+          {l:'BAC',            v:money(cost.bac),  d:'Budget at Completion',       c:cost.bac!=null?C.text:C.muted2},
+          {l:'PV (Planned)',   v:money(cost.pv),   d:'Planned Value',              c:cost.pv!=null?PLAN_COLOR:C.muted2},
+          {l:'EV (Earned)',    v:money(cost.ev),   d:'Earned Value',               c:cost.ev!=null?C.green:C.muted2},
+          {l:'AC (Actual)',    v:money(cost.ac),   d:'Actual Cost',                c:cost.ac!=null?C.amber:C.muted2},
+          {l:'EAC',            v:primaryForecast?money(primaryForecast.eac):'Unavailable', d:primaryForecast?primaryForecast.label:'No cost-loaded activities', c:!primaryForecast?C.muted2:(cost.bac!=null&&primaryForecast.eac>cost.bac?C.red:C.green)},
+          {l:'ETC',            v:(()=>{const bu=forecastScenarios.find((s:any)=>s.methodology==='BOTTOM_UP');return bu?money(bu.etc):'Unavailable';})(),    d:"P6's own remaining-cost estimate", c:C.muted2},
+          {l:'VAC',            v:primaryForecast?money(primaryForecast.vac):'Unavailable',    d:primaryForecast?`Using ${primaryForecast.label.split(' (')[0]}`:'No forecast available',c:!primaryForecast?C.muted2:(primaryForecast.vac<0?C.red:C.green)},
         ].map((k,i)=><div key={i} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:'13px 15px'}}>
           <div style={{fontSize:10,color:C.muted,textTransform:'uppercase',letterSpacing:'0.07em',marginBottom:3}}>{k.l}</div>
           <div style={{fontSize:22,fontWeight:700,color:k.c,fontFamily:"'DM Mono',monospace"}}>{k.v}</div>
           <div style={{fontSize:10,color:C.muted2,marginTop:2}}>{k.d}</div>
         </div>)}
       </div>
+      {forecastScenarios.length>1&&<div style={{fontSize:11,color:C.muted2,marginBottom:14}}>
+        Other forecast scenarios: {forecastScenarios.slice(1).map((s:any)=>`${s.label.split(' (')[0]} ${fmt$(s.eac)}`).join(' · ')}
+        {' · '}see <strong>Project Controls</strong> for the full breakdown.
+      </div>}
       {/* Performance indices */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(155px,1fr))',gap:9,marginBottom:18}}>
         {[
-          {l:'SPI',  v:(evm.SPI||0).toFixed(3),  d:'Schedule Performance Index',  c:spiColor(evm.SPI||0), warn:(evm.SPI||0)<0.95},
-          {l:'CPI',  v:(evm.CPI||0).toFixed(3),  d:'Cost Performance Index',      c:cpiColor(evm.CPI||0), warn:M.isCostLoaded&&(evm.CPI||0)<0.95},
-          {l:'SV',   v:fmt$(evm.SV||0),           d:'Schedule Variance',           c:(evm.SV||0)>=0?C.green:C.red, warn:(evm.SV||0)<0},
-          {l:'CV',   v:fmt$(evm.CV||0),           d:'Cost Variance',               c:M.isCostLoaded?((evm.CV||0)>=0?C.green:C.red):C.muted2, warn:M.isCostLoaded&&(evm.CV||0)<0},
-          {l:'TCPI', v:(evm.TCPI||0).toFixed(3),  d:'To-Complete Perf. Index',    c:(evm.TCPI||0)>1.1?C.red:(evm.TCPI||0)>1.0?C.amber:C.green},
+          {l:'SPI',  v:idx(cost.spi),  d:'Schedule Performance Index',  c:cost.spi==null?C.muted2:spiColor(cost.spi), warn:cost.spi!=null&&cost.spi<0.95},
+          {l:'CPI',  v:idx(cost.cpi),  d:'Cost Performance Index',      c:cost.cpi==null?C.muted2:cpiColor(cost.cpi), warn:cost.cpi!=null&&cost.cpi<0.95},
+          {l:'SV',   v:money(cost.sv), d:'Schedule Variance',           c:cost.sv==null?C.muted2:(cost.sv>=0?C.green:C.red), warn:cost.sv!=null&&cost.sv<0},
+          {l:'CV',   v:money(cost.cv), d:'Cost Variance',               c:cost.cv==null?C.muted2:(cost.cv>=0?C.green:C.red), warn:cost.cv!=null&&cost.cv<0},
+          {l:'TCPI', v:idx(cost.tcpi),d:'To-Complete Perf. Index',      c:cost.tcpi==null?C.muted2:(cost.tcpi>1.1?C.red:cost.tcpi>1.0?C.amber:C.green)},
         ].map((k,i)=><KPI key={i} label={k.l} value={k.v} sub={k.d} color={k.c} warn={k.warn}/>)}
       </div>
     </Sec>
@@ -2761,22 +2750,25 @@ function EVMView({M}:any){
     <Sec title="EVM by Project" icon="📋">
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,overflow:'auto'}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:900}}>
-          <thead><tr style={{background:'rgba(0,200,240,0.06)'}}>{['Project','BAC','BCWS','BCWP','ACWP','SPI','CPI','SV','CV','EAC','VAC'].map(h=><th key={h} style={{padding:'9px 12px',textAlign:'left',color:C.muted,fontWeight:600,fontSize:10,textTransform:'uppercase',letterSpacing:'0.05em',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
-          <tbody>{(M.projects||[]).map((p:any,i:number)=>(
+          <thead><tr style={{background:'rgba(0,200,240,0.06)'}}>{['Project','BAC','PV','EV','AC','SPI','CPI','SV','CV','EAC','VAC'].map(h=><th key={h} style={{padding:'9px 12px',textAlign:'left',color:C.muted,fontWeight:600,fontSize:10,textTransform:'uppercase',letterSpacing:'0.05em',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+          <tbody>{(M.projects||[]).map((p:any,i:number)=>{
+            const pc=M.authoritativeEvmByProject?.[p.id]?.cost||{};
+            const pf=M.authoritativeEvmByProject?.[p.id]?.forecast?.scenarios?.[0];
+            return(
             <tr key={p.id} style={{borderTop:`1px solid ${C.border}`}}>
               <td style={{padding:'9px 12px',color:C.text,fontWeight:600}}>{p.name}</td>
-              <td style={{padding:'9px 12px',color:C.muted2,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.BAC||0)}</td>
-              <td style={{padding:'9px 12px',color:C.accent,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.BCWS||0)}</td>
-              <td style={{padding:'9px 12px',color:C.green, fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.BCWP||0)}</td>
-              <td style={{padding:'9px 12px',color:M.isCostLoaded?C.amber:C.muted,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.ACWP||0)}</td>
-              <td style={{padding:'9px 12px',color:spiColor(p.SPI||0),fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{(p.SPI||0).toFixed(3)}</td>
-              <td style={{padding:'9px 12px',color:M.isCostLoaded?cpiColor(p.CPI||0):C.muted,fontFamily:"'DM Mono',monospace"}}>{(p.CPI||0).toFixed(3)}</td>
-              <td style={{padding:'9px 12px',color:(p.SV||0)>=0?C.green:C.red,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.SV||0)}</td>
-              <td style={{padding:'9px 12px',color:M.isCostLoaded?((p.CV||0)>=0?C.green:C.red):C.muted,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.CV||0)}</td>
-              <td style={{padding:'9px 12px',color:(p.EAC||0)>(p.BAC||0)?C.red:C.green,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.EAC||0)}</td>
-              <td style={{padding:'9px 12px',color:(p.VAC||0)<0?C.red:C.green,fontFamily:"'DM Mono',monospace",fontSize:11}}>{fmt$(p.VAC||0)}</td>
+              <td style={{padding:'9px 12px',color:C.muted2,fontFamily:"'DM Mono',monospace",fontSize:11}}>{money(pc.bac)}</td>
+              <td style={{padding:'9px 12px',color:pc.pv!=null?C.accent:C.muted,fontFamily:"'DM Mono',monospace",fontSize:11}}>{money(pc.pv)}</td>
+              <td style={{padding:'9px 12px',color:pc.ev!=null?C.green:C.muted,fontFamily:"'DM Mono',monospace",fontSize:11}}>{money(pc.ev)}</td>
+              <td style={{padding:'9px 12px',color:pc.ac!=null?C.amber:C.muted,fontFamily:"'DM Mono',monospace",fontSize:11}}>{money(pc.ac)}</td>
+              <td style={{padding:'9px 12px',color:pc.spi==null?C.muted:spiColor(pc.spi),fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{idx(pc.spi)}</td>
+              <td style={{padding:'9px 12px',color:pc.cpi==null?C.muted:cpiColor(pc.cpi),fontFamily:"'DM Mono',monospace"}}>{idx(pc.cpi)}</td>
+              <td style={{padding:'9px 12px',color:pc.sv==null?C.muted:(pc.sv>=0?C.green:C.red),fontFamily:"'DM Mono',monospace",fontSize:11}}>{money(pc.sv)}</td>
+              <td style={{padding:'9px 12px',color:pc.cv==null?C.muted:(pc.cv>=0?C.green:C.red),fontFamily:"'DM Mono',monospace",fontSize:11}}>{money(pc.cv)}</td>
+              <td style={{padding:'9px 12px',color:pf&&pc.bac!=null&&pf.eac>pc.bac?C.red:C.green,fontFamily:"'DM Mono',monospace",fontSize:11}}>{pf?money(pf.eac):'Unavailable'}</td>
+              <td style={{padding:'9px 12px',color:pf&&pf.vac<0?C.red:C.green,fontFamily:"'DM Mono',monospace",fontSize:11}}>{pf?money(pf.vac):'Unavailable'}</td>
             </tr>
-          ))}</tbody>
+          );})}</tbody>
         </table>
       </div>
     </Sec>
@@ -2793,8 +2785,8 @@ function EVMView({M}:any){
           {l:'Remaining MH',   v:fmtH(mh.remaining||0),  d:'Hours left to complete', c:C.accent},
           {l:'Earned MH',      v:fmtH(mh.earned||0),     d:'Budget × % complete',    c:C.green},
           {l:'MH % Complete',  v:`${mh.pctComplete||0}%`, d:'Earned / Budgeted',     c:M.isHrLoaded?((mh.pctComplete||0)>=80?C.green:(mh.pctComplete||0)>=50?C.amber:C.red):C.muted2},
-          {l:'MH CPI',         v:(mh.CPI||0).toFixed(3), d:'Productivity index',     c:M.isHrLoaded?cpiColor(mh.CPI||0):C.muted2, warn:M.isHrLoaded&&(mh.CPI||0)<0.95},
-          {l:'MH EAC',         v:fmtH(mh.EAC||0),        d:'Est. hours at completion',c:M.isHrLoaded?((mh.EAC||0)>(mh.budgeted||0)?C.red:C.green):C.muted2},
+          {l:'MH CPI',         v:hours.cpi!=null?hours.cpi.toFixed(3):'Unavailable', d:'Productivity index',     c:hours.cpi==null?C.muted2:cpiColor(hours.cpi), warn:hours.cpi!=null&&hours.cpi<0.95},
+          {l:'MH EAC',         v:hoursForecastScenarios[0]?fmtH(hoursForecastScenarios[0].eac):'Unavailable',        d:'Est. hours at completion',c:C.muted2},
         ].map((k:any,i)=><KPI key={i} label={k.l} value={k.v} sub={k.d} color={k.c} warn={k.warn}/>)}
       </div>
       {M.isHrLoaded&&(mh.byWBS||[]).length>0&&<CC title="Man-Hours by WBS — Budgeted vs Actual vs Earned" height={260} flex="1 1 100%">
@@ -2813,7 +2805,7 @@ function EVMView({M}:any){
           <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:700}}>
             <thead><tr style={{background:'rgba(0,200,240,0.06)'}}>{['Project','Budgeted MH','Actual MH','Remaining MH','Earned MH','MH %','MH CPI'].map(h=><th key={h} style={{padding:'9px 12px',textAlign:'left',color:C.muted,fontWeight:600,fontSize:10,textTransform:'uppercase',letterSpacing:'0.05em',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
             <tbody>{(M.projects||[]).filter((p:any)=>p.bgtHrs>0).map((p:any,i:number)=>{
-              const pMhCpi=p.actHrs>0?p.ernHrs/p.actHrs:1.0;
+              const pMhCpi=M.authoritativeEvmByProject?.[p.id]?.hours?.cpi;
               return(<tr key={p.id} style={{borderTop:`1px solid ${C.border}`}}>
                 <td style={{padding:'9px 12px',color:C.text,fontWeight:600}}>{p.name}</td>
                 <td style={{padding:'9px 12px',color:C.text,fontFamily:"'DM Mono',monospace"}}>{fmtH(p.bgtHrs||0)}</td>
@@ -2821,7 +2813,7 @@ function EVMView({M}:any){
                 <td style={{padding:'9px 12px',color:C.accent,fontFamily:"'DM Mono',monospace"}}>{fmtH(p.remHrs||0)}</td>
                 <td style={{padding:'9px 12px',color:C.green,fontFamily:"'DM Mono',monospace"}}>{fmtH(p.ernHrs||0)}</td>
                 <td style={{padding:'9px 12px',minWidth:100}}><div style={{display:'flex',alignItems:'center',gap:5}}><div style={{width:60,background:C.border,borderRadius:3,height:4}}><div style={{width:`${p.mhPct||0}%`,background:C.green,borderRadius:3,height:4}}/></div><span style={{color:'#111111',fontSize:11}}>{(p.mhPct||0).toFixed(1)}%</span></div></td>
-                <td style={{padding:'9px 12px',color:cpiColor(pMhCpi),fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{pMhCpi.toFixed(3)}</td>
+                <td style={{padding:'9px 12px',color:pMhCpi==null?C.muted:cpiColor(pMhCpi),fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{pMhCpi!=null?pMhCpi.toFixed(3):'Unavailable'}</td>
               </tr>);
             })}</tbody>
           </table>
@@ -2914,7 +2906,7 @@ ${n.worst_neg_float_acts?.length?`
   <thead><tr style="background:#1a3a5c;color:#fff">
     <th style="padding:5px 8px;text-align:left">Activity ID</th>
     <th style="padding:5px 8px;text-align:left">Activity Name</th>
-    <th style="padding:5px 8px;text-align:left">WBS Area</th>
+    <th style="padding:5px 8px;text-align:left">WBS</th>
     <th style="padding:5px 8px;text-align:right">Float (days)</th>
   </tr></thead>
   <tbody>${(n.worst_neg_float_acts||[]).map((a:any,i:number)=>`
@@ -3156,7 +3148,15 @@ function QualityView({allActivities}:any){
     </Sec>
   );
 
-  if(!hasData)return(
+  const conceptBanner=(
+    <div style={{background:`${C.purple}0a`,border:`1px solid ${C.purple}30`,borderRadius:10,padding:'10px 16px',marginBottom:14,fontSize:12,color:C.muted,display:'flex',alignItems:'center',gap:8}}>
+      <span style={{fontSize:14}}>🔗</span>
+      <span>This is a live open-ends view — one input into <strong style={{color:C.purple}}>QUALITY</strong> ("is the schedule built correctly?"). The full DCMA-style Quality Score (circular logic, constraints, lags, duration outliers) is shown on the <strong>Status</strong> tab alongside Status and Risk for comparison.</span>
+    </div>
+  );
+
+  if(!hasData)return(<>
+    {conceptBanner}
     <div style={{textAlign:"center",padding:"60px 20px",color:C.muted2}}>
       <div style={{fontSize:36,marginBottom:12}}>🔗</div>
       <div style={{fontSize:16,fontWeight:600,color:C.text,marginBottom:8}}>No Logic Data in Dataset</div>
@@ -3168,7 +3168,7 @@ function QualityView({allActivities}:any){
         <code style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:4,padding:"1px 6px",fontSize:12,marginLeft:4}}>successors</code> fields with each activity.
       </div>
     </div>
-  );
+  </>);
 
   const showAll      = activeFilter===null||activeFilter==="ALL";
   const showNoPred   = activeFilter===null||activeFilter==="NO_PRED";
@@ -3176,7 +3176,8 @@ function QualityView({allActivities}:any){
   const showIsolated = activeFilter===null||activeFilter==="ISOLATED";
 
   return(<>
-    <Sec title="Logic Check Summary" icon="🔗">
+    {conceptBanner}
+    <Sec title="Open Ends Check Summary" icon="🔗">
       <div style={{fontSize:11,color:C.muted2,marginBottom:10}}>Click a card to filter the list below · click again to show all</div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:9,marginBottom:16}}>
         {kpis.map(k=>(
@@ -3235,7 +3236,10 @@ function NarrativeView({M,files,selectedIds,allActivities,dataDate}:any){
     setLoading(true);setErr(null);setResult(null);setEditedSections({});
     const body:any={
       current_activities:allActivities,
-      data_date:dataDate||new Date().toISOString().slice(0,10),
+      // No "|| today" fallback — the backend must require an explicit Data
+      // Date for this narrative's quality/status assessment rather than
+      // this call silently substituting today.
+      data_date:dataDate||undefined,
       settings:{
         project_name:cfg.projectName||defaultProject,
         company:cfg.company,
@@ -3549,7 +3553,7 @@ function NarrativeView({M,files,selectedIds,allActivities,dataDate}:any){
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,overflow:'auto'}}>
                 <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:480}}>
                   <thead><tr style={{background:`${C.red}08`}}>
-                    {['Activity ID','Activity Name','WBS Area','Float (days)'].map(h=>(
+                    {['Activity ID','Activity Name','WBS','Float (days)'].map(h=>(
                       <th key={h} style={{padding:'8px 12px',textAlign:'left',color:C.muted,fontWeight:600,fontSize:10,textTransform:'uppercase',letterSpacing:'0.05em'}}>{h}</th>
                     ))}
                   </tr></thead>
@@ -3624,22 +3628,14 @@ function NarrativeView({M,files,selectedIds,allActivities,dataDate}:any){
 }
 
 // ─── HOME UPLOAD PANEL (shown inside the dashboard shell when no data) ────────
-function HomeUploadPanel({onLoad}:any){
+function HomeUploadPanel({onLoad,onSelectFiles}:any){
   const [drag,setDrag]=useState(false);
-  const [loading,setLoading]=useState(false);
-  const [errs,setErrs]=useState<string[]>([]);
+  const loading=false;
+  const errs:string[]=[];
   const ref=useRef<HTMLInputElement>(null);
 
-  const go=async(fl:File[])=>{
-    setLoading(true);setErrs([]);
-    const res:any[]=[],e2:string[]=[];
-    for(const f of fl){
-      try{const r=await processFileViaAPI(f);if(r)res.push(r);else e2.push(`${f.name}: unsupported`);}
-      catch(e:any){e2.push(`${f.name}: ${e.message}`);}
-    }
-    setErrs(e2);
-    if(res.length)onLoad(res);
-    setLoading(false);
+  const go=(fl:File[])=>{
+    if(fl.length)onSelectFiles(fl);
   };
 
   return(
@@ -4142,9 +4138,11 @@ function TIAView({M,allActivities}:any){
 }
 
 // ─── POWER BI VIEW ────────────────────────────────────────────────────────────
-function PowerBIView({M,allActivities}:any){
+function PowerBIView({M,allActivities,dataDate}:any){
   const acts=allActivities||[];
-  const today=new Date();
+  // "Overdue" below is evaluated against the active schedule's own
+  // effective Data Date — never today's date.
+  const today=parseDate(dataDate);
 
   const [selStatus,setSelStatus]=useState<Set<string>>(new Set());
   const [selProject,setSelProject]=useState<Set<string>>(new Set());
@@ -4203,7 +4201,7 @@ function PowerBIView({M,allActivities}:any){
   const complete=filtered.filter((a:any)=>(a.pctComplete||0)>=100).length;
   const inProg=filtered.filter((a:any)=>a.start&&(a.pctComplete||0)<100).length;
   const notStarted=filtered.filter((a:any)=>!a.start).length;
-  const overdue=filtered.filter((a:any)=>{const f=parseDate(a.bFinish||a.finish);return f&&f<today&&(a.pctComplete||0)<100&&!a.isMilestone;}).length;
+  const overdue=filtered.filter((a:any)=>{const f=parseDate(a.bFinish||a.finish);return f&&today&&f<today&&(a.pctComplete||0)<100&&!a.isMilestone;}).length;
   const critical=filtered.filter((a:any)=>a.isCritical&&!a.isMilestone).length;
   const totalDur=filtered.reduce((s:number,a:any)=>s+(a.dur||0),0);
   const earnedDur=filtered.reduce((s:number,a:any)=>s+(a.dur||0)*((a.pctComplete||0)/100),0);
@@ -4292,7 +4290,7 @@ function PowerBIView({M,allActivities}:any){
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <span style={{fontSize:20}}>📊</span>
-          <span style={{fontSize:16,fontWeight:700,color:C.text}}>Power BI Dashboard</span>
+          <span style={{fontSize:16,fontWeight:700,color:C.text}}>Cross-Filter Dashboard</span>
           <span style={{fontSize:11,color:C.muted,background:C.card,border:`1px solid ${C.border}`,borderRadius:6,padding:'2px 8px'}}>
             {total.toLocaleString()} of {acts.length.toLocaleString()} activities
           </span>
@@ -5333,10 +5331,10 @@ const STATUS_ICONS:Record<string,string>={
 };
 const SEVERITY_COLORS:Record<string,string>={RED:'#d93030',YELLOW:'#c47c00',CRITICAL:'#8b0000',OK:'#00936b'};
 
-function ScoreMeter({label,score,color,size=64}:{label:string;score:number;color:string;size?:number}){
+function ScoreMeter({label,score,color,size=64,tooltip}:{label:string;score:number;color:string;size?:number;tooltip?:string}){
   const r=size*0.38;const circ=2*Math.PI*r;const dash=circ*(score/100);
   return(
-    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+    <div title={tooltip} style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4,cursor:tooltip?'help':'default'}}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={C.border} strokeWidth={size*0.09}/>
         <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={size*0.09}
@@ -5347,7 +5345,9 @@ function ScoreMeter({label,score,color,size=64}:{label:string;score:number;color
           {Math.round(score)}
         </text>
       </svg>
-      <span style={{fontSize:10,color:C.muted,fontWeight:600,letterSpacing:'0.05em',textTransform:'uppercase'}}>{label}</span>
+      <span style={{fontSize:10,color:C.muted,fontWeight:600,letterSpacing:'0.05em',textTransform:'uppercase',display:'flex',alignItems:'center',gap:3}}>
+        {label}{tooltip&&<span style={{fontSize:9,opacity:0.6}}>ⓘ</span>}
+      </span>
     </div>
   );
 }
@@ -5420,7 +5420,7 @@ function TriggeredThreshold({t}:{t:any}){
   );
 }
 
-function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:string}){
+function StatusView({allActivities,dataDate,onOpenActivityAnalysis}:{allActivities:any[];dataDate:string;onOpenActivityAnalysis?:()=>void}){
   const [result,setResult]=useState<any>(null);
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState<string|null>(null);
@@ -5443,18 +5443,22 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
   };
   const drillList=useMemo(()=>{
     if(!drillKey)return[];
-    const dd=(()=>{const d=dataDate?new Date(dataDate):new Date();return isNaN(d.getTime())?new Date():d;})();
+    // Missed-start/missed-finish drill-downs compare against the active
+    // schedule's own effective Data Date — never today's date. If it's
+    // genuinely unavailable, those two predicates simply match nothing
+    // rather than silently substituting today.
+    const dd=parseDate(dataDate);
     const isIncomplete=(a:any)=>!a.isMilestone&&(a.pctComplete||0)<100;
     const preds:Record<string,(a:any)=>boolean>={
       critical:(a:any)=>isIncomplete(a)&&(a.isCritical||(a.totalFloat!=null&&a.totalFloat<=0)),
       near:(a:any)=>isIncomplete(a)&&a.totalFloat!=null&&a.totalFloat>0&&a.totalFloat<=5,
       missedStart:(a:any)=>{
-        if(!isIncomplete(a))return false;
+        if(!isIncomplete(a)||!dd)return false;
         const bs=a.bStart instanceof Date?a.bStart:a.bStart?new Date(a.bStart):null;
         return!!bs&&bs<dd&&!a.start;
       },
       missedFinish:(a:any)=>{
-        if(!isIncomplete(a))return false;
+        if(!isIncomplete(a)||!dd)return false;
         const bf=a.bFinish instanceof Date?a.bFinish:a.bFinish?new Date(a.bFinish):null;
         return!!bf&&bf<dd&&(a.pctComplete||0)<100;
       },
@@ -5467,7 +5471,11 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
     setLoading(true);setErr(null);setResult(null);
     const body:any={
       current_activities:allActivities,
-      data_date:dataDate||new Date().toISOString().slice(0,10),
+      // No "|| today" fallback — the backend's own NO_DATA_DATE gate
+      // (status_engine.py) must be allowed to trigger when the active
+      // schedule genuinely has no effective Data Date, rather than this
+      // call silently substituting today and masking that condition.
+      data_date:dataDate||undefined,
     };
     if(contractFinish)body.contract_finish_date=contractFinish;
     if(milestoneRows.length){
@@ -5506,6 +5514,14 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
 
   return(
     <div style={{maxWidth:1100}}>
+      {/* ── Concept banner: STATUS is one of three distinct ScheduleIQ health
+          pillars (QUALITY / STATUS / RISK) — see also Open Ends Check (Quality)
+          and Risk & Milestones (Risk). Kept as a small explainer, not a
+          redesign. ── */}
+      <div style={{background:`${C.accent}0a`,border:`1px solid ${C.accent}30`,borderRadius:10,padding:'10px 16px',marginBottom:14,fontSize:12,color:C.muted,display:'flex',alignItems:'center',gap:8}}>
+        <span style={{fontSize:14}}>🎯</span>
+        <span><strong style={{color:C.accent}}>STATUS</strong> answers "how is the project currently performing?" — a classification against contract dates, milestones, and baseline. See <strong>Open Ends Check</strong> for schedule <strong>Quality</strong> (is it built correctly) and <strong>Risk &amp; Milestones</strong> for <strong>Risk</strong> (where future exposure is concentrated).</span>
+      </div>
       {/* ── Config Panel ── */}
       <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:'18px 22px',marginBottom:18}}>
         <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:14}}>🎯 Schedule Status Engine</div>
@@ -5611,11 +5627,14 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
                 )}
               </div>
               <div style={{display:'flex',gap:22,flexWrap:'wrap',alignItems:'center'}}>
-                <ScoreMeter label="Risk Score" score={result.risk_score||0}
-                  color={result.risk_score>60?C.red:result.risk_score>35?C.amber:C.green}/>
-                <ScoreMeter label="Confidence" score={result.confidence_score||0} color={C.accent}/>
-                <ScoreMeter label="Quality" score={result.schedule_quality_score||0}
-                  color={result.schedule_quality_score<60?C.red:result.schedule_quality_score<80?C.amber:C.green}/>
+                <ScoreMeter label="Off-Track Factor" score={result.risk_score||0}
+                  color={result.risk_score>60?C.red:result.risk_score>35?C.amber:C.green}
+                  tooltip="STATUS: how strongly current indicators (milestones, critical float, progress) point toward AT RISK/OFF TRACK. Not the same number as the Risk Heat Map under Risk & Milestones, which measures where future exposure is concentrated."/>
+                <ScoreMeter label="Confidence" score={result.confidence_score||0} color={C.accent}
+                  tooltip="How much supporting data (baseline, previous update, contractual milestones) was available for this classification — not a schedule health score itself."/>
+                <ScoreMeter label="Schedule Quality" score={result.schedule_quality_score||0}
+                  color={result.schedule_quality_score<60?C.red:result.schedule_quality_score<80?C.amber:C.green}
+                  tooltip="QUALITY: how structurally sound the schedule is — DCMA-style checks for open ends, constraints, circular logic, excessive float. Independent of current progress; see the Open Ends Check tab for the live open-ends view."/>
               </div>
             </div>
           </div>
@@ -5650,6 +5669,12 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
             <div style={{background:C.card,border:`1px solid ${C.accent}50`,borderRadius:12,padding:'16px 18px'}}>
               <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
                 <div style={{fontWeight:800,fontSize:13,color:C.text}}>{drillTitles[drillKey]} ({drillList.length})</div>
+                {onOpenActivityAnalysis&&(
+                  <button onClick={onOpenActivityAnalysis} title="Open the full, authoritative activity list in Activity Analysis"
+                    style={{background:`${C.accent}14`,border:`1px solid ${C.accent}40`,color:C.accent,borderRadius:6,padding:'3px 10px',cursor:'pointer',fontSize:11,fontFamily:'inherit',fontWeight:600}}>
+                    Open in Activity Analysis →
+                  </button>
+                )}
                 <button onClick={()=>setDrillKey(null)}
                   style={{marginLeft:'auto',background:'transparent',border:`1px solid ${C.border}`,color:C.muted2,borderRadius:6,padding:'3px 10px',cursor:'pointer',fontSize:11,fontFamily:'inherit'}}>
                   ✕ Close
@@ -5685,7 +5710,8 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
           {/* ── Risk Score Breakdown ── */}
           {result.risk_score_breakdown&&Object.keys(result.risk_score_breakdown).length>0&&(
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:'18px 22px'}}>
-              <div style={{fontWeight:800,fontSize:13,color:C.text,marginBottom:14}}>Risk Score Breakdown</div>
+              <div style={{fontWeight:800,fontSize:13,color:C.text,marginBottom:2}}>Off-Track Factor Breakdown</div>
+              <div style={{fontSize:11,color:C.muted2,marginBottom:14}}>How each STATUS input contributed — distinct from the Risk Heat Map score under Risk &amp; Milestones.</div>
               <div style={{display:'flex',flexDirection:'column',gap:8}}>
                 {Object.entries(result.risk_score_breakdown).map(([cat,v]:any)=>(
                   <div key={cat} style={{display:'flex',alignItems:'center',gap:10}}>
@@ -5785,18 +5811,136 @@ function StatusView({allActivities,dataDate}:{allActivities:any[];dataDate:strin
   );
 }
 
+// ─── LEGACY VIEW → BACKEND WORKSPACE REDIRECT ──────────────────────────────
+// Dashboard Consolidation Phase 1: several legacy client-side views
+// independently recomputed something an authoritative backend workspace
+// already computes correctly (see the Sep-2026 duplication audit). Rather
+// than deleting their render code outright — real risk in a file this size
+// — they are replaced with this same "moved" pattern Intelligence.tsx's
+// Recovery Planner tab already used successfully, so the switch is
+// reversible and low-risk. The legacy calculation functions themselves are
+// left in place (dead code, not deleted) rather than risk removing a
+// helper another view still depends on.
+function LegacyMovedNotice({title, body, destinationLabel, destinationView, setView, goTo}:{
+  title:string; body:string; destinationLabel:string; destinationView:string; setView:(v:string)=>void;
+  // Optional: when the currently-selected local file is linked to a backend
+  // Project/ScheduleVersion (imported via Import Center), pass its ids so
+  // the destination workspace opens already scoped to the SAME schedule
+  // instead of an empty "select a project" screen.
+  goTo?:()=>void;
+}){
+  return (
+    <div style={{textAlign:"center",padding:60}}>
+      <div style={{fontSize:14,color:C.text,marginBottom:6,fontWeight:700}}>{title}</div>
+      <div style={{fontSize:13,color:C.muted,marginBottom:18,maxWidth:480,marginLeft:"auto",marginRight:"auto"}}>{body}</div>
+      <button onClick={()=>{if(goTo)goTo();setView(destinationView);}}
+        style={{background:C.accent,color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+        Go to {destinationLabel} →
+      </button>
+    </div>
+  );
+}
+
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App(){
   const [files,setFiles]=useState<any[]>([]);
   const [selectedIds,setSelectedIds]=useState<any[]>([]);
   const [view,setView]=useState("portfolio");
+  // Set right after a successful Import Center commit when the user picks a
+  // quick-action ("View Update Intelligence" etc.) — lets those backend-
+  // driven workspaces (which own their own project selector) pre-select the
+  // just-imported project instead of showing an empty picker.
+  const [preferredProjectId,setPreferredProjectId]=useState<string|undefined>(undefined);
+  // Set when "Manage Versions" is clicked from Update Analysis / Baseline &
+  // Progress — tells ProjectControls to land directly on its Schedule
+  // Versions sub-tab instead of the default Cost Summary one.
+  const [preferredSubTab,setPreferredSubTab]=useState<string|undefined>(undefined);
+  // One-shot deep-link context for "Analyze Recovery" quick-links from
+  // Update Intelligence / Critical Path into the Risk & Recovery workspace.
+  const [preferredVersionId,setPreferredVersionId]=useState<string|undefined>(undefined);
+  const [preferredRiskKey,setPreferredRiskKey]=useState<string|undefined>(undefined);
+  const [preferredActivityId,setPreferredActivityId]=useState<string|undefined>(undefined);
+  // One-shot filter seed for Activity Analysis, set by the legacy Activities
+  // register's replacement deep links (global search jump, Portfolio KPI
+  // drill-through, "view this project") — see activityNavigation.ts.
+  const [preferredActivityFilters,setPreferredActivityFilters]=useState<Record<string,any>|undefined>(undefined);
+  // One-shot filter seed for Float Analysis — Main Dashboard's Float
+  // Health panel (negative/zero/near-critical).
+  const [preferredFloatFilter,setPreferredFloatFilter]=useState<"negative"|"zero"|"nearCritical"|undefined>(undefined);
+  const handleManageVersions=useCallback((projectId:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredSubTab("versions");
+    setView("projectControls");
+  },[]);
+  const handleAnalyzeRecovery=useCallback((projectId:string,versionId?:string,riskKey?:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setPreferredRiskKey(riskKey);
+    setPreferredSubTab("register");
+    setView("riskIntel");
+  },[]);
+  // Cross-navigation from Activity Analysis's Activity Detail drawer into
+  // Float Analysis, preserving project/version/activity context so the
+  // scheduler never has to re-search for the same activity.
+  const handleOpenFloatAnalysis=useCallback((projectId:string,versionId:string,activityId:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setPreferredActivityId(activityId);
+    setView("floatAnalysis");
+  },[]);
+  // Main Dashboard drill-down handlers — a gateway into the detailed
+  // workspaces, never a duplicate of them (see Dashboard.tsx).
+  const handleDashboardOpenFloatAnalysis=useCallback((projectId:string,versionId:string,filter?:"negative"|"zero"|"nearCritical")=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setPreferredFloatFilter(filter);
+    setView("floatAnalysis");
+  },[]);
+  const handleDashboardOpenActivityAnalysis=useCallback((projectId:string,versionId:string,filters?:Record<string,any>)=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setPreferredActivityFilters(filters||{});
+    setView("activityAnalysis");
+  },[]);
+  const handleDashboardOpenUpdateAnalysis=useCallback((projectId:string)=>{
+    setPreferredProjectId(projectId);
+    setView("updateAnalysis");
+  },[]);
+  const handleDashboardOpenRiskMilestones=useCallback((projectId:string,versionId:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setView("riskIntel");
+  },[]);
+  const handleDashboardOpenProjectControls=useCallback((projectId:string,versionId:string,subTab?:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredSubTab(subTab);
+    setView("projectControls");
+  },[]);
+  const handleDashboardOpenBaselineProgress=useCallback((projectId:string)=>{
+    setPreferredProjectId(projectId);
+    setView("baselineProgress");
+  },[]);
+  const handleDashboardOpenIntelligence=useCallback(()=>{
+    setView("intelligence");
+  },[]);
+  // Manual top-nav clicks are not a quick-link — clear any one-shot deep-link
+  // intent so navigating away and back (e.g. via the nav bar, not another
+  // quick-link) lands on each workspace's normal default tab instead of
+  // getting permanently "stuck" on whatever a prior quick-link requested.
+  const handleNavClick=useCallback((v:string)=>{
+    setPreferredSubTab(undefined);
+    setPreferredVersionId(undefined);
+    setPreferredRiskKey(undefined);
+    setPreferredActivityId(undefined);
+    setPreferredActivityFilters(undefined);
+    setPreferredFloatFilter(undefined);
+    setView(v);
+  },[]);
   const [M,setM]=useState<any>(null);
   const [metricsLoading,setMetricsLoading]=useState(false); // true only until the FIRST metrics computation lands
   const [metricsRefreshing,setMetricsRefreshing]=useState(false); // true on every later recompute — never blocks the view
   const [metricsError,setMetricsError]=useState<string|null>(null);
   const [dataDate,setDataDate]=useState<string>(()=>new Date().toISOString().slice(0,10));
-  const [activitySearch,setActivitySearch]=useState<string>("");
-  const [activityFilt,setActivityFilt]=useState<string>("ALL");
 
   const allActivities=useMemo(
     ()=>files.filter(f=>selectedIds.includes(f.id)).flatMap(f=>f.activities),
@@ -5903,13 +6047,59 @@ export default function App(){
     idbLoadAll().then(saved=>{
       if(saved.length){
         setFiles(saved);
-        setSelectedIds(saved.map((f:any)=>f.id));
+        // Restore a previously-narrowed single-file selection (e.g. the
+        // user was viewing one specific schedule version's toolbar Data
+        // Date) so a reload doesn't silently widen back to "all files" and
+        // change what the toolbar shows — Test 6 in the Data Date spec.
+        // Falls back to "all files selected" (the pre-existing default)
+        // whenever there's no saved single selection, or it's stale.
+        let restoredIds=saved.map((f:any)=>f.id);
+        try{
+          const savedSel=JSON.parse(localStorage.getItem('scheduleiq_selectedIds')||'null');
+          if(Array.isArray(savedSel)&&savedSel.length===1&&saved.some((f:any)=>f.id===savedSel[0])){
+            restoredIds=savedSel;
+          }
+        }catch{/* ignore malformed localStorage value */}
+        setSelectedIds(restoredIds);
         const merged:LogicEditMap={};
         saved.forEach((f:any)=>{if(f.logicEdits)Object.assign(merged,f.logicEdits);});
         if(Object.keys(merged).length)setLogicEdits(merged);
+        // Initialize the toolbar Data Date from the active selection's own
+        // effective date rather than defaulting to today.
+        const active=restoredIds.length===1?saved.filter((f:any)=>f.id===restoredIds[0]):saved;
+        const eff=pickEffectiveDataDate(active);
+        if(eff)setDataDate(eff);
       }
     }).catch(()=>{/* IDB unavailable — silently ignore */});
   },[]);
+
+  // Remember a single-file selection across reloads (see above) — never
+  // persists a multi-file selection, so "all files" stays the untouched
+  // default whenever the user isn't specifically focused on one version.
+  // Deliberately does nothing while selectedIds is still empty (its
+  // pristine initial value, before the async IndexedDB-load effect above
+  // has resolved) — otherwise this effect's own mount-time pass would wipe
+  // out the very value that effect is about to read.
+  useEffect(()=>{
+    if(selectedIds.length===0)return;
+    try{
+      if(selectedIds.length===1)localStorage.setItem('scheduleiq_selectedIds',JSON.stringify(selectedIds));
+      else localStorage.removeItem('scheduleiq_selectedIds');
+    }catch{/* localStorage unavailable — session-only, non-fatal */}
+  },[selectedIds]);
+
+  // ── Toolbar Data Date follows the single active version when the user ──
+  // switches which one file/project is selected in the project picker
+  // (selecting exactly one narrows the session to that version — see
+  // ProjectSelector's toggle()). With multiple files selected the toolbar
+  // stays a session-wide projection date, same as it always has been.
+  useEffect(()=>{
+    if(selectedIds.length===1){
+      const f=files.find((x:any)=>x.id===selectedIds[0]);
+      if(f?.dataDate)setDataDate(f.dataDate);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[selectedIds]);
 
   // Persist logic edits onto each affected project's saved IndexedDB record,
   // so they survive a reload the same way an uploaded project does.
@@ -5935,40 +6125,90 @@ export default function App(){
     newFiles.forEach(f=>idbSave(f).catch(()=>{}));
     setFiles(prev=>{const merged=[...prev,...newFiles];setSelectedIds(merged.map(f=>f.id));return merged;});
   },[]);
+
+  // ── Import Center: files picked at Home (replace) vs "+ Add Files" (merge) ──
+  const [pendingImportFiles,setPendingImportFiles]=useState<File[]|null>(null);
+  const [pendingImportMode,setPendingImportMode]=useState<"load"|"add">("add");
+  const handleSelectFilesToLoad=useCallback((fl:File[])=>{setPendingImportMode("load");setPendingImportFiles(fl);},[]);
+  const handleSelectFilesToAdd=useCallback((fl:File[])=>{setPendingImportMode("add");setPendingImportFiles(fl);},[]);
+  const handleImportCancel=useCallback(()=>setPendingImportFiles(null),[]);
+  const handleImportConfirm=useCallback((results:any[])=>{
+    const deserialized=results.map(r=>({...r,activities:r.activities.map(deserializeActivity)}));
+    if(pendingImportMode==="load")handleLoad(deserialized);else handleAdd(deserialized);
+    setPendingImportFiles(null);
+    // Toolbar Data Date follows the just-imported file's own effective
+    // Data Date (from ScheduleUpload, detected or user-confirmed at Import
+    // Preview) — never today's date, never a stale previous file's date.
+    const eff=pickEffectiveDataDate(deserialized);
+    if(eff)setDataDate(eff);
+  },[pendingImportMode,handleLoad,handleAdd]);
   const handleReset=useCallback(()=>{
     // Only clears the current view — saved projects survive a page refresh
     setFiles([]);setSelectedIds([]);setM(null);setView("portfolio");
     setDataDate(new Date().toISOString().slice(0,10));
-    setActivitySearch("");
   },[]);
 
+  // The backend Project/ScheduleUpload rows are the single source of truth
+  // (the Intelligence Portal reads the same rows), so a file that was
+  // imported to the backend is deleted THERE first; only then is the local
+  // copy removed. If the backend delete fails, nothing is removed locally
+  // so the two never disagree.
   const handleDeleteProject=useCallback((id:string)=>{
-    idbDelete(id).catch(()=>{});
-    setFiles(prev=>{
-      const next=prev.filter((f:any)=>f.id!==id);
-      setSelectedIds(ids=>ids.filter((x:any)=>x!==id));
-      return next;
-    });
-  },[]);
+    const f:any=files.find((x:any)=>x.id===id);
+    const removeLocal=()=>{
+      idbDelete(id).catch(()=>{});
+      setFiles(prev=>{
+        const next=prev.filter((x:any)=>x.id!==id);
+        setSelectedIds(ids=>ids.filter((x:any)=>x!==id));
+        return next;
+      });
+    };
+    if(!(f?.projectId&&f?.scheduleUploadId)){removeLocal();return;}
+    fetch(`/api/projects/${f.projectId}/versions/${f.scheduleUploadId}/`,{method:"DELETE"})
+      .then(async r=>{
+        if(r.status===404)return {projectNowEmpty:false};   // already gone server-side — just clear the local copy
+        if(!r.ok)throw new Error(await r.text());
+        return r.json();
+      })
+      .then(res=>{
+        removeLocal();
+        if(res.projectNowEmpty&&window.confirm("That was the last schedule version in this project.\n\nAlso delete the now-empty project record? (The Intelligence Portal already hides projects with no schedules.)")){
+          fetch(`/api/projects/${f.projectId}/`,{method:"DELETE"}).catch(()=>{}).finally(notifyProjectsChanged);
+        }else notifyProjectsChanged();
+      })
+      .catch((e:any)=>window.alert(`Could not delete this schedule from ScheduleIQ, so it was NOT removed: ${e.message||e}`));
+  },[files]);
 
+  // Activities register retired (Phase 1 consolidation, item #3) — these
+  // three deep links now land in Activity Analysis instead, translated via
+  // activityNavigation.ts's pure mapping (unit-tested in
+  // tests/activityNavigation.test.mjs). Project/version scoping only applies
+  // when the target file has real backend linkage (projectId +
+  // scheduleUploadId from an Import Center commit) — the same disclosed
+  // limitation as every other cross-workspace deep link in this app; a
+  // locally-cached file with no backend record lands on Activity Analysis's
+  // own (empty) project picker instead.
   const handleGoToActivity=useCallback((activity:any)=>{
-    setView("activities");
-    setActivityFilt("ALL");
-    setActivitySearch(activity.code||activity.name||"");
-  },[]);
+    const f=files.find((x:any)=>x.id===activity.projectId||(x.activities||[]).some((a:any)=>a.projectId===activity.projectId));
+    if(f?.projectId&&f?.scheduleUploadId){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}
+    setPreferredActivityFilters(activityJumpFilter(activity.code||activity.name));
+    setView("activityAnalysis");
+  },[files]);
 
   const handleGoToFilter=useCallback((filt:string)=>{
-    setView("activities");
-    setActivitySearch("");
-    setActivityFilt(filt);
-  },[]);
+    const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId);
+    if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}
+    setPreferredActivityFilters(legacyFilterToActivityAnalysis(filt));
+    setView("activityAnalysis");
+  },[files,selectedIds]);
 
   const handleGoToProject=useCallback((fileId:string)=>{
     setSelectedIds([fileId]);
-    setView("activities");
-    setActivitySearch("");
-    setActivityFilt("ALL");
-  },[]);
+    const f=files.find((x:any)=>x.id===fileId);
+    if(f?.projectId&&f?.scheduleUploadId){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}
+    setPreferredActivityFilters({});
+    setView("activityAnalysis");
+  },[files]);
 
   // ── Phase sidebar filter ──────────────────────────────────────────────────
   const [phaseFilter,setPhaseFilter]=useState<string|null>(null);
@@ -6027,12 +6267,43 @@ export default function App(){
   const setPhaseFilterU=useCallback((v:string|null)=>{captureUndo();setPhaseFilter(v);},[captureUndo]);
   const setDataDateU=useCallback((v:string)=>{captureUndo();setDataDate(v);},[captureUndo]);
 
-  // ── Phase sidebar click → go to Activities view filtered by that phase ────
+  // ── Toolbar Data Date edit: when it unambiguously belongs to ONE real,
+  // backend-persisted schedule version (exactly one file selected, and
+  // that file has a projectId/scheduleUploadId from a real import commit),
+  // persist the edit as that version's effective Data Date — same PATCH
+  // Project Controls' own Data Date editor uses, so both stay consistent.
+  // Falls back to the existing session-only projection date otherwise
+  // (multiple files selected, or a file with no backend record — e.g.
+  // legacy locally-cached data) so nothing here can silently fail or
+  // regress the pre-existing "explore a hypothetical date" behavior.
+  const handleDataDateChange=useCallback((v:string)=>{
+    setDataDateU(v);
+    if(selectedIds.length===1){
+      const f=files.find((x:any)=>x.id===selectedIds[0]);
+      if(f?.projectId&&f?.scheduleUploadId){
+        fetch(`/api/projects/${f.projectId}/versions/${f.scheduleUploadId}/`,{
+          method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({dataDate:v}),
+        }).then(async r=>{
+          if(!r.ok)return;
+          const updated=await r.json();
+          setFiles(prev=>{
+            const next=prev.map((x:any)=>x.id===f.id?{...x,dataDate:updated.dataDate,sourceDataDate:updated.sourceDataDate,dataDateOverridden:updated.dataDateOverridden}:x);
+            const saved=next.find((x:any)=>x.id===f.id);
+            if(saved)idbSave(saved).catch(()=>{});
+            return next;
+          });
+        }).catch(()=>{/* keep the session-only projection date even if the persisted update fails */});
+      }
+    }
+  },[selectedIds,files,setDataDateU]);
+
+  // ── Phase sidebar click → applies the phase filter across the legacy
+  // views that consume phasedActivities, and opens Activity Analysis (which
+  // has its own "Group by Phase (EPC)" option covering the same
+  // categorization on the authoritative backend rows).
   const handlePhaseSelect=useCallback((v:string|null)=>{
     setPhaseFilterU(v);
-    setView("activities");
-    setActivitySearch("");
-    setActivityFilt("ALL");
+    setView("activityAnalysis");
   },[setPhaseFilterU]);
 
   return(
@@ -6042,9 +6313,9 @@ export default function App(){
     <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'DM Sans',sans-serif",color:C.text}}>
       <Header
         files={files} selectedIds={selectedIds} onSelectionChange={setSelectedIds}
-        onAddFiles={handleAdd} onReset={handleReset} view={view} setView={setView}
+        onSelectFiles={handleSelectFilesToAdd} onReset={handleReset} view={view} setView={handleNavClick}
         allActivities={allActivities} onGoToActivity={handleGoToActivity}
-        dataDate={dataDate} onDataDateChange={setDataDateU}
+        dataDate={dataDate} onDataDateChange={handleDataDateChange} onResetDataDateToToday={setDataDateU}
         onDeleteProject={handleDeleteProject}
       />
 
@@ -6114,23 +6385,55 @@ export default function App(){
               <div style={{fontSize:11,color:C.muted2,marginTop:8}}>The file was uploaded ({allActivities.length.toLocaleString()} activities loaded) but the analytics engine returned an error. Please send this message to support.</div>
             </div>
           )}
-          {!M&&!metricsLoading&&!metricsError&&<HomeUploadPanel onLoad={handleLoad}/>}
+          {!M&&!metricsLoading&&!metricsError&&<HomeUploadPanel onLoad={handleLoad} onSelectFiles={handleSelectFilesToLoad}/>}
+          {view==="dashboard"                      &&<Dashboard initialProjectId={preferredProjectId} initialVersionId={preferredVersionId}
+            onOpenFloatAnalysis={handleDashboardOpenFloatAnalysis} onOpenActivityAnalysis={handleDashboardOpenActivityAnalysis}
+            onOpenUpdateAnalysis={handleDashboardOpenUpdateAnalysis} onOpenRiskMilestones={handleDashboardOpenRiskMilestones}
+            onOpenProjectControls={handleDashboardOpenProjectControls} onOpenBaselineProgress={handleDashboardOpenBaselineProgress}
+            onOpenIntelligence={handleDashboardOpenIntelligence}/>}
           {M&&!metricsLoading&&view==="portfolio"  &&<PortfolioView M={M} files={files} selectedIds={selectedIds} allActivities={phasedActivities} onGoToFilter={handleGoToFilter} onGoToProject={handleGoToProject}/>}
           {M&&!metricsLoading&&view==="scurve"     &&<SCurveView M={M} allActivities={phasedActivities} files={files} selectedIds={selectedIds}/>}
-          {M&&!metricsLoading&&view==="critical"   &&<CriticalView M={M} allActivities={phasedActivities} onUpdateActivity={updateActivity} activityUpdates={activityUpdates}/>}
-          {M&&!metricsLoading&&view==="variance"   &&<VarianceView M={M} allActivities={phasedActivities} onUpdateActivity={updateActivity} activityUpdates={activityUpdates}/>}
-          {M&&!metricsLoading&&view==="evm"        &&<EVMView M={M}/>}
+          {M&&!metricsLoading&&view==="gantt"      &&<GanttView allActivities={phasedActivities} dataDate={dataDate} onGoToActivity={()=>setView("critical")}/>}
+          {M&&!metricsLoading&&view==="critical"   &&<CriticalView M={M} allActivities={phasedActivities} onUpdateActivity={updateActivity} activityUpdates={activityUpdates} dataDate={dataDate}/>}
+          {M&&!metricsLoading&&view==="variance"   &&<LegacyMovedNotice title="Variance moved to Activity Analysis"
+            body="Baseline Start/Finish variance, delayed/advanced breakdowns and a Biggest Finish Slips preset all read the same activity_analysis.py rows — with working-day-confident variance and Update Movement alongside, which this page didn't have."
+            destinationLabel="Activity Analysis" destinationView="activityAnalysis" setView={setView}
+            goTo={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}}}/>}
+          {M&&!metricsLoading&&view==="evm"        &&<LegacyMovedNotice title="EVM & Man-Hours moved to Project Controls"
+            body="Earned Value, Cost Summary and Labor Productivity now live in one workspace on the same cost_engine.py figures, with Performance Trends, Variance Drivers and Management Narrative alongside them."
+            destinationLabel="Project Controls" destinationView="projectControls" setView={setView}
+            goTo={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}}}/>}
           {M&&!metricsLoading&&view==="histogram"  &&<HistogramView M={M} allActivities={phasedActivities}/>}
-          {M&&!metricsLoading&&view==="comparison" &&<ComparisonView M={M} files={files}/>}
-          {M&&!metricsLoading&&view==="activities" &&<ActivityRegister allActivities={phasedActivities} projects={M.projects} initialSearch={activitySearch} onSearchChange={setActivitySearch} initialFilt={activityFilt} onUpdateActivity={updateActivity} activityUpdates={activityUpdates} dataDate={dataDate}/>}
-          {view==="diff"                            &&<ScheduleDiff files={files}/>}
+          {M&&!metricsLoading&&view==="comparison" &&<LegacyMovedNotice title="Comparison is now part of Portfolio"
+            body="The project-comparison table was the same portfolio rollup as Portfolio's card view — click Table View there instead of switching pages."
+            destinationLabel="Portfolio" destinationView="portfolio" setView={setView}/>}
+          {view==="activities"                      &&<LegacyMovedNotice title="Activities is now Activity Analysis"
+            body="Search, named filters (Critical, Overdue, Negative Float, Milestones, etc.) and per-project views all carry over — plus Group by Phase (EPC), Quick Views, working-day-confident variance and Update Movement this page didn't have."
+            destinationLabel="Activity Analysis" destinationView="activityAnalysis" setView={setView}
+            goTo={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}}}/>}
+          {view==="diff"                            &&<LegacyMovedNotice title="Schedule Diff moved to Update Analysis"
+            body="Compare Updates in Update Analysis reads the same backend comparison engine (schedule_comparison.py) that AI Chat and Reports already use, so every workspace agrees on what changed between two versions."
+            destinationLabel="Update Analysis" destinationView="updateAnalysis" setView={setView}
+            goTo={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}}}/>}
           {view==="oos"                              &&<OutOfSequenceView allActivities={phasedActivities}/>}
           {view==="quality"                         &&<QualityView allActivities={phasedActivities}/>}
           {view==="narrative"                       &&<NarrativeView M={M} files={files} selectedIds={selectedIds} allActivities={phasedActivities} dataDate={dataDate}/>}
           {M&&!metricsLoading&&view==="tia"         &&<TIAView M={M} allActivities={phasedActivities}/>}
-          {M&&!metricsLoading&&view==="powerbi"     &&<PowerBIView M={M} allActivities={phasedActivities}/>}
+          {M&&!metricsLoading&&view==="powerbi"     &&<PowerBIView M={M} allActivities={phasedActivities} dataDate={dataDate}/>}
           {view==="resources"                       &&<ResourceView allActivities={phasedActivities}/>}
-          {view==="status"                          &&<StatusView allActivities={phasedActivities} dataDate={dataDate}/>}
+          {view==="status"                          &&<StatusView allActivities={phasedActivities} dataDate={dataDate}
+            onOpenActivityAnalysis={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);} setView("activityAnalysis");}}/>}
+          {view==="updateAnalysis"                  &&<UpdateAnalysis initialProjectId={preferredProjectId} onManageVersions={handleManageVersions} onAnalyzeRecovery={handleAnalyzeRecovery}/>}
+          {view==="riskIntel"                        &&<RiskIntelligence initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialSubTab={preferredSubTab} initialRiskKey={preferredRiskKey}/>}
+          {view==="activityAnalysis"                  &&<ActivityAnalysis initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialFilters={preferredActivityFilters} onOpenFloatAnalysis={handleOpenFloatAnalysis} onOpenRiskRecovery={handleAnalyzeRecovery}/>}
+          {view==="floatAnalysis"                     &&<FloatAnalysis initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialActivityId={preferredActivityId} initialFloatFilter={preferredFloatFilter}/>}
+          {view==="projectControls"                  &&<ProjectControls initialProjectId={preferredProjectId} initialSubTab={preferredSubTab}/>}
+          {view==="baselineProgress"                  &&<BaselineProgress initialProjectId={preferredProjectId} onManageVersions={handleManageVersions}/>}
+          {view==="intelligence"                      &&<Intelligence onOpenRecovery={(pid,vid)=>handleAnalyzeRecovery(pid,vid,undefined)}/>}
+          {view==="reports"                            &&<LegacyMovedNotice title="Reports moved to Project Controls"
+            body="Project Controls' Reports tab uses the authoritative report_service.py pipeline — Float Intelligence, Progress & Milestones, Update Intelligence and Schedule Risk & Recovery sections, persisted snapshots, and real PDF/Excel export — instead of a quick popup summary."
+            destinationLabel="Project Controls" destinationView="projectControls" setView={setView}
+            goTo={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}}}/>}
         </div>
       </div>
     </div>
@@ -6145,6 +6448,10 @@ export default function App(){
         pointerEvents:'none',whiteSpace:'nowrap'}}>
         {undoToast}
       </div>
+    )}
+    {pendingImportFiles&&pendingImportFiles.length>0&&(
+      <ImportCenter files={pendingImportFiles} onCancel={handleImportCancel} onConfirm={handleImportConfirm}
+        onNavigate={(v,projectId)=>{setPreferredProjectId(projectId);setPreferredSubTab(undefined);setPreferredVersionId(undefined);setPreferredRiskKey(undefined);setPreferredActivityFilters(undefined);setView(v);}}/>
     )}
     </Fragment>
   );

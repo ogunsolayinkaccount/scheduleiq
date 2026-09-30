@@ -52,7 +52,7 @@ def _detect_circular_logic(activities: List[dict]) -> int:
     for a in activities:
         aid = a.get('code') or a.get('id') or ''
         for pred in (a.get('predecessors') or []):
-            pid = pred.get('id') or pred.get('activityId') or ''
+            pid = pred.get('actId') or pred.get('id') or pred.get('activityId') or ''
             if pid in in_degree:
                 in_degree[aid] = in_degree.get(aid, 0) + 1
 
@@ -62,7 +62,7 @@ def _detect_circular_logic(activities: List[dict]) -> int:
     for a in activities:
         aid = a.get('code') or a.get('id') or ''
         for pred in (a.get('predecessors') or []):
-            pid = pred.get('id') or pred.get('activityId') or ''
+            pid = pred.get('actId') or pred.get('id') or pred.get('activityId') or ''
             if pid in adj:
                 adj[pid].append(aid)
 
@@ -209,7 +209,7 @@ def _check_out_of_sequence(activities: List[dict], dd: date) -> Dict:
         if not a.get('start'):
             continue
         for pred in (a.get('predecessors') or []):
-            pid = pred.get('id') or pred.get('activityId') or ''
+            pid = pred.get('actId') or pred.get('id') or pred.get('activityId') or ''
             if pid in incomplete_ids:
                 oos += 1
                 break

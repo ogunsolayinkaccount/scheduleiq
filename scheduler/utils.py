@@ -4,6 +4,7 @@ import math
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -309,6 +310,17 @@ def _start_variance(activity, today: date = None) -> Optional[int]:
 
 
 def compute_metrics(activities, data_date=None):
+    # CPM & Data Date Governance audit note: this function backs the legacy
+    # multi-project browser dashboard's "session-wide projection date"
+    # feature (App.tsx's toolbar `dataDate`), which is a deliberately
+    # different, explicitly-labeled concept from a specific ScheduleUpload's
+    # own effective Data Date (see that toolbar's visible forward-looking/
+    # historical banner and "Reset to Today" control) — the newer Project/
+    # ScheduleUpload-backed engines (cost_engine.py, baseline_progress.py,
+    # etc.) never fall back to today() and instead return an explicit
+    # unavailable/None result; this function's one real caller always
+    # supplies a real `data_date` already, so this fallback exists only as
+    # a defensive default for that intentionally-different workflow.
     today = data_date if isinstance(data_date, date) else date.today()
     if not activities:
         return {

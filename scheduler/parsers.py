@@ -6,6 +6,8 @@ from typing import Optional, List, Dict, Any
 
 import pandas as pd
 
+from .calendar_engine import decode_calendar_data
+
 
 # ── Date parsing ──────────────────────────────────────────────────────────────
 
@@ -321,6 +323,12 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             preds_map.setdefault(succ_id, []).append({'actId': pred_id, 'relType': rel_type, 'lagDays': lag_days})
             succs_map.setdefault(pred_id, []).append({'actId': succ_id, 'relType': rel_type, 'lagDays': lag_days})
 
+    # Reference data (calendars / activity codes / UDFs) — gap-fill, Phase 2.
+    ref = extract_xer_reference_data(sections)
+    calendar_name_by_id = ref['calendar_name_by_id']
+    task_codes = ref['task_codes']
+    task_udfs = ref['task_udfs']
+
     activities = []
     for t in sections.get('TASK', []):
         task_id   = t.get('task_id', '')
@@ -334,6 +342,17 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
         remain_dur_hrs = float(t.get('remain_drtn_hr_cnt') or 0)
         dur            = (orig_dur_hrs or remain_dur_hrs) / 8
         remain_dur     = remain_dur_hrs / 8
+        # Provenance for `dur` — additive only, does not change `dur` itself.
+        # `dur` silently falls back to Remaining Duration when P6's own
+        # target_drtn_hr_cnt is blank/zero (see line above); this flag lets
+        # callers distinguish a confidently-imported Original Duration from
+        # a fallback value before presenting it as "Original Duration".
+        if orig_dur_hrs > 0:
+            orig_dur_source = 'IMPORTED'
+        elif remain_dur_hrs > 0:
+            orig_dur_source = 'FALLBACK_REMAINING'
+        else:
+            orig_dur_source = 'UNAVAILABLE'
 
         # Respect P6's % Complete Type field (CP_Drtn / CP_Phys / CP_Units)
         pct_type  = (t.get('complete_pct_type') or '').strip()
@@ -383,6 +402,7 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             'remainStart':  parse_date(t.get('restart_date')),
             'remainFinish': parse_date(t.get('reend_date')),
             'dur':          dur,
+            'origDurSource': orig_dur_source,
             'remainDur':    remain_dur,
             'totalFloat':   tf,
             'freeFloat':    free_tf,
@@ -428,9 +448,182 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             'remainingWork':     float(t.get('remain_work_qty') or 0) / 8,
             'pctCompleteType':   pct_type or 'CP_Drtn',
             'physPctComplete':   phys_pct,
+            # ── Gap-fill: calendar name, activity codes, UDFs (Phase 2) ────────
+            'calendarName':      calendar_name_by_id.get(t.get('clndr_id') or '', ''),
+            'activityCodes':     {c['typeName']: c['value'] for c in task_codes.get(task_id, [])},
+            'udfs':              dict(task_udfs.get(task_id, {})),
         })
+        # Canonical filter fields (area/discipline/contractor/system/phase/
+        # responsibleManager) — same keys Excel/CSV import produces, so
+        # filtering/comparison work uniformly regardless of source format.
+        for code in task_codes.get(task_id, []):
+            canon = _canonical_code_key(code['typeName'])
+            if canon and canon not in activities[-1]:
+                activities[-1][canon] = code['value']
 
     return activities
+
+
+# ── XER project metadata ──────────────────────────────────────────────────────
+
+def parse_project_meta_from_xer(sections: Dict[str, List[dict]]) -> Dict[str, Any]:
+    """
+    Extract project-level fields from the XER PROJECT table. Takes the first
+    PROJECT row — XER exports are almost always single-project; multi-project
+    exports would need per-activity proj_id scoping, which is out of scope here.
+    Returns {} (not fabricated values) when the PROJECT table is missing fields.
+    """
+    rows = sections.get('PROJECT', [])
+    if not rows:
+        return {}
+    p = rows[0]
+    return {
+        'project_id': p.get('proj_id') or '',
+        'project_name': p.get('proj_short_name') or p.get('proj_id') or '',
+        'data_date': parse_date(p.get('last_recalc_date')),
+        'planned_start': parse_date(p.get('plan_start_date')),
+        'forecast_finish': parse_date(p.get('scd_end_date')) or parse_date(p.get('plan_end_date')),
+        'must_finish_by': parse_date(p.get('plan_end_date')) if p.get('must_finish_date') is None else parse_date(p.get('must_finish_date')),
+        'default_calendar_id': p.get('clndr_id') or '',
+    }
+
+
+# ── XER reference data: calendars, activity codes, UDFs ───────────────────────
+
+def extract_xer_reference_data(sections: Dict[str, List[dict]]) -> Dict[str, Any]:
+    """
+    Parse CALENDAR / ACTVTYPE / ACTVCODE / UDFTYPE into plain-dict rows ready
+    for bulk_create into the Calendar / ActivityCodeType / ActivityCode /
+    UDFType Django models.
+
+    XER's clndr_data blob (per-day working hours / holiday exceptions) is
+    run through calendar_engine.decode_calendar_data(), which only trusts
+    well-documented structural markers (DaysOfWeek/Day, Exceptions/Excp) and
+    reports its own confidence ('high'/'partial'/'none') rather than
+    guessing. has_detailed_definition is set True only when that decode
+    yields a usable standard_workweek, so callers still never treat an
+    undecoded or low-confidence calendar as a full working calendar.
+    """
+    calendars = []
+    for c in sections.get('CALENDAR', []):
+        def _hrs(key):
+            try:
+                v = c.get(key)
+                return float(v) if v not in (None, '') else None
+            except (TypeError, ValueError):
+                return None
+        raw_clndr_data = c.get('clndr_data') or ''
+        decoded = decode_calendar_data(raw_clndr_data)
+        has_detail = decoded['confidence'] in ('high', 'partial') and bool(decoded['standardWorkweek'])
+        calendars.append({
+            'calendar_id': c.get('clndr_id') or '',
+            'name': c.get('clndr_name') or '',
+            'calendar_type': c.get('clndr_type') or '',
+            'is_default': str(c.get('default_flag', '')).strip().upper() in ('Y', '1', 'TRUE'),
+            'hours_per_day': _hrs('day_hr_cnt'),
+            'hours_per_week': _hrs('week_hr_cnt'),
+            'hours_per_month': _hrs('month_hr_cnt'),
+            'hours_per_year': _hrs('year_hr_cnt'),
+            'has_detailed_definition': has_detail,
+            'standard_workweek': decoded['standardWorkweek'] or {},
+            'exceptions': decoded['exceptions'],
+            'raw_definition': raw_clndr_data,
+        })
+
+    code_types = []
+    code_type_name_by_id: Dict[str, str] = {}
+    for t in sections.get('ACTVTYPE', []):
+        type_id = t.get('actv_code_type_id') or ''
+        name = t.get('actv_code_type') or type_id
+        code_type_name_by_id[type_id] = name
+        code_types.append({
+            'code_type_id': type_id,
+            'name': name,
+            'is_global': str(t.get('actv_code_type_scope', '')).strip().upper() in ('AS_GLOBAL', 'GLOBAL'),
+        })
+
+    codes = []
+    code_value_by_id: Dict[str, dict] = {}   # actv_code_id -> {typeId, value}
+    for c in sections.get('ACTVCODE', []):
+        code_id = c.get('actv_code_id') or ''
+        type_id = c.get('actv_code_type_id') or ''
+        value = c.get('short_name') or c.get('actv_code_name') or code_id
+        codes.append({
+            'code_type_id': type_id,
+            'code_id': code_id,
+            'code_value': value,
+            'description': c.get('actv_code_name') or '',
+            'parent_code_id': c.get('parent_actv_code_id') or '',
+        })
+        code_value_by_id[code_id] = {'typeId': type_id, 'typeName': code_type_name_by_id.get(type_id, type_id), 'value': value}
+
+    # task_id -> [{typeName, value}] via TASKACTV assignment rows
+    task_codes: Dict[str, List[dict]] = {}
+    for a in sections.get('TASKACTV', []):
+        task_id = a.get('task_id') or ''
+        code_id = a.get('actv_code_id') or ''
+        info = code_value_by_id.get(code_id)
+        if task_id and info:
+            task_codes.setdefault(task_id, []).append({'typeName': info['typeName'], 'value': info['value']})
+
+    udf_types = []
+    udf_type_name_by_id: Dict[str, str] = {}
+    for u in sections.get('UDFTYPE', []):
+        udf_id = u.get('udf_type_id') or ''
+        field_name = u.get('udf_type_label') or u.get('udf_type_name') or udf_id
+        udf_type_name_by_id[udf_id] = field_name
+        udf_types.append({
+            'udf_type_id': udf_id,
+            'field_name': field_name,
+            'subject_area': u.get('table_name') or '',
+            'data_type': u.get('logical_data_type') or '',
+        })
+
+    # task_id -> {fieldName: value} via UDFVALUE rows (subject_area TASK only —
+    # project-level UDFs would need proj_id scoping, out of scope for the
+    # per-activity enrichment this feeds).
+    task_udfs: Dict[str, Dict[str, str]] = {}
+    for v in sections.get('UDFVALUE', []):
+        task_id = v.get('fk_id') or ''
+        udf_id = v.get('udf_type_id') or ''
+        field_name = udf_type_name_by_id.get(udf_id)
+        if not (task_id and field_name):
+            continue
+        value = (
+            v.get('udf_text') or v.get('udf_number') or v.get('udf_date')
+            or v.get('udf_code_id') or ''
+        )
+        if value:
+            task_udfs.setdefault(task_id, {})[field_name] = value
+
+    return {
+        'calendars': calendars,
+        'code_types': code_types,
+        'codes': codes,
+        'udf_types': udf_types,
+        'task_codes': task_codes,   # not persisted directly — used to enrich activities in xer_to_activities
+        'task_udfs': task_udfs,     # not persisted directly — used to enrich activities in xer_to_activities
+        'calendar_name_by_id': {c['calendar_id']: c['name'] for c in calendars},
+    }
+
+
+# Activity-code type names that map onto ScheduleIQ's canonical filter fields
+# (the same ones Excel/CSV import recognises via column_mapping.py), so a
+# project's Area/Discipline/Contractor/etc. filter the same way regardless of
+# whether it came in as XER activity codes or an Excel column.
+_CANONICAL_CODE_TYPE_MAP = {
+    'area': 'area', 'system': 'system', 'phase': 'phase',
+    'discipline': 'discipline', 'contractor': 'contractor', 'subcontractor': 'contractor',
+    'responsible': 'responsibleManager', 'manager': 'responsibleManager', 'location': 'area',
+}
+
+
+def _canonical_code_key(type_name: str) -> Optional[str]:
+    norm = re.sub(r'[^a-z]+', '', str(type_name).lower())
+    for token, canonical in _CANONICAL_CODE_TYPE_MAP.items():
+        if token in norm:
+            return canonical
+    return None
 
 
 # ── MS Project XML parser ─────────────────────────────────────────────────────
@@ -919,6 +1112,57 @@ def parse_pdf_schedule(pdf_file_obj) -> List[dict]:
         pass
 
     return []
+
+
+# ── PDF narrative/document text extraction ────────────────────────────────────
+
+def extract_pdf_text(pdf_file_obj, max_pages: int = 200) -> Dict[str, Any]:
+    """
+    Extract plain text from a PDF for narrative-document storage (schedule
+    narratives, lookaheads, owner/contractor reports) — NOT for structured
+    activity parsing (that's parse_pdf_schedule).
+
+    Uses pdfminer's embedded-text extraction only, matching the rest of
+    ScheduleIQ's PDF handling — no OCR. A scanned/image-only PDF will
+    legitimately extract little or no text; that's reported via status/
+    warnings rather than silently returning an empty success.
+    """
+    warnings: List[str] = []
+    try:
+        if hasattr(pdf_file_obj, 'seek'):
+            pdf_file_obj.seek(0)
+        from pdfminer.high_level import extract_text
+        from pdfminer.pdfpage import PDFPage
+
+        text = extract_text(pdf_file_obj, maxpages=max_pages) or ''
+
+        page_count = None
+        try:
+            if hasattr(pdf_file_obj, 'seek'):
+                pdf_file_obj.seek(0)
+            page_count = sum(1 for _ in PDFPage.get_pages(pdf_file_obj, maxpages=max_pages))
+        except Exception:
+            pass
+
+        stripped = text.strip()
+        if not stripped:
+            warnings.append(
+                'No embedded text could be extracted — this PDF may be scanned/image-only. '
+                'OCR is not enabled.'
+            )
+            status = 'FAILED'
+        elif len(stripped) < 200:
+            warnings.append('Very little text was extracted — extraction may be incomplete.')
+            status = 'PARTIAL'
+        else:
+            status = 'SUCCESS'
+
+        return {'text': text, 'page_count': page_count, 'status': status, 'warnings': warnings}
+    except Exception as exc:
+        return {
+            'text': '', 'page_count': None, 'status': 'FAILED',
+            'warnings': [f'PDF text extraction failed: {exc}'],
+        }
 
 
 # ── Excel / CSV parser ────────────────────────────────────────────────────────

@@ -56,8 +56,11 @@ def _days_label(n: int) -> str:
 
 # ── Activity predicates ────────────────────────────────────────────────────────
 
-def _complete(a: dict) -> bool:
-    return (a.get("pctComplete") or 0) >= 100
+# Canonical rule (activity_analysis.is_activity_complete): actual finish date
+# present OR pctComplete >= 100. This file previously used a NARROWER rule
+# (pctComplete >= 100 only) that could disagree with Float Intelligence/Risk
+# Register about the same activity - centralized to the approved rule.
+from .activity_analysis import is_activity_complete as _complete
 
 
 def _ms(a: dict) -> bool:
