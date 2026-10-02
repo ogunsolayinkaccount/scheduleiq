@@ -10,7 +10,8 @@ from django.test import TestCase
 
 from scheduler import project_consolidation as pc
 from scheduler.models import (
-    MitigationAction, Project, ProjectControlsReport, RecoveryScenario, ScheduleRisk, ScheduleUpload,
+    ContractualMilestoneRevision, MilestoneDefinition, MitigationAction, Project, ProjectControlsReport,
+    RecoveryScenario, ScheduleRisk, ScheduleUpload,
 )
 from .fixtures import make_activity
 from .test_project_consolidation import _Base, acts, version
@@ -88,6 +89,18 @@ class ApplyExecutionTests(ApplyBase):
         self.report = ProjectControlsReport.objects.create(project=self.pc2, schedule_upload=self.mar_dup, report_type='WEEKLY_PROJECT_CONTROLS')
         self.risk = ScheduleRisk.objects.create(project=self.pb, risk_key='A7', owner='sam', first_identified_version=self.feb)
         self.action = MitigationAction.objects.create(project=self.pa, description='keep me', scenario=None)
+        # Field Dashboard's Contractual Milestone register — project-scoped
+        # (schedule_upload intentionally left unset, per MilestoneDefinition's
+        # own design), so it must follow the same project-level REPOINT path
+        # as MitigationAction/ManualCostEntry, never get left behind on the
+        # emptied source project.
+        self.milestone = MilestoneDefinition.objects.create(
+            project=self.pa, activity_id='MS1', description='Area B turnover',
+            milestone_category='CONTRACTUAL_INTERIM', contract_required_date=date(2026, 12, 15),
+        )
+        self.revision = ContractualMilestoneRevision.objects.create(
+            milestone=self.milestone, previous_date=date(2026, 11, 1), new_date=date(2026, 12, 15), reason='owner-approved',
+        )
 
     def apply(self):
         plan, payload = self.approve(self.files_)
@@ -125,6 +138,21 @@ class ApplyExecutionTests(ApplyBase):
         self.assertEqual((str(self.risk.project_id), self.risk.owner), (canon_id, 'sam'))   # workflow preserved
         self.assertEqual(str(self.action.project_id), canon_id)
         self.assertEqual(RecoveryScenario.objects.filter(schedule_upload__isnull=True).count(), 0)
+
+    def test_contractual_milestone_register_and_its_revision_history_move_to_canonical(self):
+        plan, _ = self.apply()
+        canon_id = next(l for l in plan['lineages'] if len(l['versions']) > 1)['canonicalProject']['projectId']
+        self.milestone.refresh_from_db()
+        self.assertEqual(str(self.milestone.project_id), canon_id)
+        self.assertEqual(MilestoneDefinition.objects.filter(project_id=canon_id, activity_id='MS1').count(), 1)
+        # The revision never had its own project pointer — it follows its
+        # parent MilestoneDefinition automatically, and nothing about its
+        # own history is altered by the move.
+        self.revision.refresh_from_db()
+        self.assertEqual(self.revision.previous_date, date(2026, 11, 1))
+        self.assertEqual(self.revision.new_date, date(2026, 12, 15))
+        self.assertEqual(self.revision.reason, 'owner-approved')
+        self.assertEqual(ContractualMilestoneRevision.objects.filter(milestone__project_id=canon_id).count(), 1)
 
     def test_roles_after_apply_follow_data_date(self):
         plan, _ = self.apply()

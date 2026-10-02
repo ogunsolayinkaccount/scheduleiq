@@ -96,9 +96,9 @@ def _suggest_name(p6_names: List[str]) -> Optional[str]:
 def build_consolidation_plan(name_contains: Optional[str] = None,
                              app_files: Optional[List[dict]] = None) -> Dict[str, Any]:
     from .models import (
-        ActivityCodeType, Calendar, CostAccount, ManualCostEntry, MilestoneDefinition, MitigationAction,
-        Project, ProjectControlsReport, RecoveryScenario, ScheduleAnalysis, ScheduleDocument, ScheduleRisk,
-        ScheduleUpload, UDFType,
+        ActivityCodeType, Calendar, ContractualMilestoneRevision, CostAccount, ManualCostEntry, MilestoneDefinition,
+        MitigationAction, Project, ProjectControlsReport, RecoveryScenario, ScheduleAnalysis, ScheduleDocument,
+        ScheduleRisk, ScheduleUpload, UDFType,
     )
     from . import views as V
 
@@ -403,6 +403,10 @@ def build_consolidation_plan(name_contains: Optional[str] = None,
             _add('ProjectControlsReport', ProjectControlsReport.objects.filter(project_id=sp).count(), 'project', frm, to, 'REPOINT', 'saved report snapshots')
             _add('ScheduleDocument', ScheduleDocument.objects.filter(project_id=sp).count(), 'project', frm, to, 'REPOINT')
             _add('ManualCostEntry', ManualCostEntry.objects.filter(project_id=sp).count(), 'project', frm, to, 'REPOINT')
+            _add('MilestoneDefinition', MilestoneDefinition.objects.filter(project_id=sp).count(), 'project', frm, to, 'REPOINT',
+                 'contractual milestone register entries (Field Dashboard) — revision history follows automatically')
+            _add('ContractualMilestoneRevision', ContractualMilestoneRevision.objects.filter(milestone__project_id=sp).count(),
+                 'project', frm, to, 'REPOINT', 'follows its MilestoneDefinition parent — not independently repointed')
             src_keys = set(ScheduleRisk.objects.filter(project_id=sp).values_list('risk_key', flat=True))
             conflict = src_keys & canon_risk_keys
             _add('ScheduleRisk', len(src_keys - conflict), 'project', frm, to, 'REPOINT', 'risk workflow rows (owner/status/notes)')
@@ -583,8 +587,8 @@ def apply_consolidation_plan(name_contains: Optional[str], app_files: Optional[L
     versions are moved, never deleted. Refuses on any mismatch."""
     from django.db import transaction
     from .models import (
-        ManualCostEntry, MitigationAction, Project, ProjectControlsReport, RecoveryScenario, ScheduleAnalysis,
-        ScheduleDocument, ScheduleRisk, ScheduleUpload,
+        ManualCostEntry, MilestoneDefinition, MitigationAction, Project, ProjectControlsReport, RecoveryScenario,
+        ScheduleAnalysis, ScheduleDocument, ScheduleRisk, ScheduleUpload,
     )
     from . import views as V
 
@@ -648,6 +652,9 @@ def apply_consolidation_plan(name_contains: Optional[str], app_files: Optional[L
                 bump('ScheduleDocument', ScheduleDocument.objects.filter(project_id=sp).update(project_id=canon_id))
                 bump('ManualCostEntry', ManualCostEntry.objects.filter(project_id=sp).update(project_id=canon_id))
                 bump('ScheduleRisk', ScheduleRisk.objects.filter(project_id=sp).update(project_id=canon_id))
+                # ContractualMilestoneRevision has no project_id of its own —
+                # it follows its MilestoneDefinition parent automatically.
+                bump('MilestoneDefinition', MilestoneDefinition.objects.filter(project_id=sp).update(project_id=canon_id))
 
             for e in dups:
                 dup, twin = ScheduleUpload.objects.filter(pk=e['versionId']).first(), ScheduleUpload.objects.filter(pk=e['duplicateOf']).first()

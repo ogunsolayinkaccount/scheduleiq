@@ -251,6 +251,17 @@ class MilestoneDefinition(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # A contractual obligation belongs to the PROJECT, not to one schedule
+    # version — it must survive every subsequent re-import (that's the
+    # whole point of a register with revision history). schedule_upload
+    # below is kept for optional per-version tagging only; the Field
+    # Dashboard's Contractual Milestone Tracker CRUD always scopes by
+    # project and leaves schedule_upload unset, so deleting any one
+    # schedule version can never delete a register entry.
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE,
+        related_name='contractual_milestones', null=True, blank=True
+    )
     schedule_upload = models.ForeignKey(
         ScheduleUpload, on_delete=models.CASCADE,
         related_name='milestones', null=True, blank=True
@@ -275,10 +286,21 @@ class MilestoneDefinition(models.Model):
     allowable_variance_days = models.FloatField(default=0.0)
     responsible_organization = models.CharField(max_length=200, blank=True)
     is_critical_milestone = models.BooleanField(default=False)
+    # A PM-flagged, documented schedule exposure specific to THIS milestone
+    # (e.g. a known procurement delay threatening it) — one of the two
+    # independent YELLOW triggers in contractual_milestones.py. Never
+    # derived from unrelated schedule-wide negative-float activities; only
+    # ever set explicitly here.
+    has_documented_issue = models.BooleanField(default=False)
     approval_status = models.CharField(max_length=20, blank=True)
     notes = models.TextField(blank=True)
     approved_by = models.CharField(max_length=200, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
+    # The authorized document this contract_required_date traces to (a
+    # contract clause, an approved change order, an owner notice) — the
+    # Field Dashboard's Contractual Milestone Tracker never displays a
+    # contractual date without being able to show where it came from.
+    source_document_reference = models.CharField(max_length=500, blank=True)
 
     class Meta:
         ordering = ['contract_required_date', 'activity_id']
@@ -291,6 +313,34 @@ class MilestoneDefinition(models.Model):
 
     def __str__(self):
         return f'{self.activity_id} — {self.milestone_category}'
+
+
+class ContractualMilestoneRevision(models.Model):
+    """
+    Audit trail for an authorized change to a MilestoneDefinition's
+    contract_required_date — the Field Dashboard's Contractual Milestone
+    Tracker requires visible revision history, never a silently-overwritten
+    date. Written automatically by the API whenever contract_required_date
+    changes; never backfilled or inferred for a date that was never
+    actually revised through this record.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    milestone = models.ForeignKey(
+        MilestoneDefinition, on_delete=models.CASCADE, related_name='revisions'
+    )
+    previous_date = models.DateField(null=True, blank=True)
+    new_date = models.DateField(null=True, blank=True)
+    source_document_reference = models.CharField(max_length=500, blank=True)
+    reason = models.TextField(blank=True)
+    changed_by = models.CharField(max_length=200, blank=True)
+    changed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-changed_at']
+
+    def __str__(self):
+        return f'{self.milestone_id}: {self.previous_date} -> {self.new_date}'
 
 
 class ScheduleAnalysis(models.Model):

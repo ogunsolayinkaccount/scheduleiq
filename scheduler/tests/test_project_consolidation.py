@@ -12,7 +12,8 @@ from django.utils import timezone
 
 from scheduler import project_consolidation as pc
 from scheduler.models import (
-    MitigationAction, Project, ProjectControlsReport, RecoveryScenario, ScheduleRisk, ScheduleUpload,
+    ContractualMilestoneRevision, MilestoneDefinition, MitigationAction, Project, ProjectControlsReport,
+    RecoveryScenario, ScheduleRisk, ScheduleUpload,
 )
 from .fixtures import make_activity
 
@@ -304,6 +305,18 @@ class ReferenceRepointTests(_Base):
         self.assertEqual(scen['from']['versionId'], dup_id)
         self.assertEqual(scen['to']['versionId'], twin)
         self.assertEqual(RecoveryScenario.objects.count(), 2)                     # plan changed nothing
+
+    def test_contractual_milestone_register_is_reported_as_a_project_level_repoint(self):
+        for proj in (self.pa, self.pb, self.pc, self.pc2):
+            m = MilestoneDefinition.objects.create(project=proj, activity_id=f'MS-{proj.id}', milestone_category='CONTRACTUAL_COMPLETION')
+            ContractualMilestoneRevision.objects.create(milestone=m, new_date=date(2026, 12, 1))
+        plan = self.plan(name_contains='barn')
+        models = {(r['model'], r['action']) for r in plan['references']}
+        self.assertIn(('MilestoneDefinition', 'REPOINT'), models)
+        self.assertIn(('ContractualMilestoneRevision', 'REPOINT'), models)
+        # The plan never writes.
+        self.assertEqual(MilestoneDefinition.objects.count(), 4)
+        self.assertEqual(ContractualMilestoneRevision.objects.count(), 4)
 
     def test_duplicate_risk_keys_are_flagged_as_merge_conflicts_not_overwritten(self):
         ScheduleRisk.objects.create(project=self.pa, risk_key='A1', owner='alice')

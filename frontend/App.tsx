@@ -12,6 +12,7 @@ import ActivityAnalysis from "./ActivityAnalysis";
 import FloatAnalysis from "./FloatAnalysis";
 import Intelligence from "./Intelligence";
 import Dashboard from "./Dashboard";
+import FieldDashboard from "./FieldDashboard";
 import Reports from "./Reports";
 import { applyLogicEdits, computeCPM, wouldCreateCycle, linkKey, type RelType, type LogicEdit, type LogicEditMap } from "./cpm";
 import { pickDrivingRel, tracePath } from "./pathTrace";
@@ -989,6 +990,7 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
   const isPast=dataDate<todayStr;
   const nav=[
     {id:"dashboard", label:"Dashboard",    icon:"📌", highlight:true},
+    {id:"fieldDashboard", label:"Field Dashboard", icon:"🏗️", highlight:true},
     {id:"portfolio", label:"Portfolio",    icon:"🏢"},
     {id:"scurve",    label:"S-Curves",     icon:"📈"},
     {id:"gantt",     label:"Gantt",        icon:"📅", highlight:true},
@@ -6391,6 +6393,7 @@ export default function App(){
             onOpenUpdateAnalysis={handleDashboardOpenUpdateAnalysis} onOpenRiskMilestones={handleDashboardOpenRiskMilestones}
             onOpenProjectControls={handleDashboardOpenProjectControls} onOpenBaselineProgress={handleDashboardOpenBaselineProgress}
             onOpenIntelligence={handleDashboardOpenIntelligence}/>}
+          {view==="fieldDashboard"                 &&<FieldDashboard initialProjectId={preferredProjectId} initialVersionId={preferredVersionId}/>}
           {M&&!metricsLoading&&view==="portfolio"  &&<PortfolioView M={M} files={files} selectedIds={selectedIds} allActivities={phasedActivities} onGoToFilter={handleGoToFilter} onGoToProject={handleGoToProject}/>}
           {M&&!metricsLoading&&view==="scurve"     &&<SCurveView M={M} allActivities={phasedActivities} files={files} selectedIds={selectedIds}/>}
           {M&&!metricsLoading&&view==="gantt"      &&<GanttView allActivities={phasedActivities} dataDate={dataDate} onGoToActivity={()=>setView("critical")}/>}

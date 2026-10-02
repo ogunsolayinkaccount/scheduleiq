@@ -59,6 +59,7 @@ from . import report_service
 from . import baseline_progress
 from . import update_intelligence
 from . import schedule_identity
+from . import contractual_milestones
 
 
 def serialize_date(value):
@@ -2749,6 +2750,30 @@ def project_cost_summary(request, pk):
         import traceback
         return error_response(f'Cost summary error: {exc} | {traceback.format_exc()[-600:]}', status=500)
 
+    breakdown = _compute_budget_breakdown(project, summary)
+
+    return JsonResponse({
+        'projectId': str(project.id),
+        'versionId': str(version.id),
+        'versionLabel': version.version_label,
+        'dataDate': data_date.isoformat() if hasattr(data_date, 'isoformat') else data_date,
+        'evMethod': ev_method,
+        'pvMethod': pv_method,
+        **breakdown,
+    })
+
+
+def _compute_budget_breakdown(project, summary):
+    """Budget (original/approved changes/current=BAC), Actuals, Commitments
+    and Forecast/Approved EAC — shared by /cost-summary/ and the Field
+    Dashboard's Current Spend/Budget/Earned Value KPIs, so both read the
+    exact same ManualCostEntry layering over the same compute_cost_summary
+    result rather than two copies of this logic. Budget and Actuals come
+    from the imported XER (TASKRSRC); Approved Budget Changes, Commitments
+    and Approved EAC come only from ManualCostEntry rows — P6 XER has no
+    source for any of those three."""
+    from .models import ManualCostEntry
+
     manual_entries = list(ManualCostEntry.objects.filter(project=project))
     approved_changes = [e for e in manual_entries if e.entry_type == 'APPROVED_BUDGET_CHANGE']
     commitments = [e for e in manual_entries if e.entry_type == 'COMMITMENT']
@@ -2768,13 +2793,7 @@ def project_cost_summary(request, pk):
     )
     commitments_total = sum(e.cost or 0.0 for e in commitments) if commitments else None
 
-    return JsonResponse({
-        'projectId': str(project.id),
-        'versionId': str(version.id),
-        'versionLabel': version.version_label,
-        'dataDate': data_date.isoformat() if hasattr(data_date, 'isoformat') else data_date,
-        'evMethod': ev_method,
-        'pvMethod': pv_method,
+    return {
         'budget': {
             'originalBudget': {'value': original_budget, 'source': original_source},
             'approvedBudgetChanges': {
@@ -2804,7 +2823,7 @@ def project_cost_summary(request, pk):
                 if approved_eac else {'value': None, 'source': 'unavailable'}
             ),
         },
-    })
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4367,6 +4386,420 @@ def project_mitigation_action_detail(request, pk, action_id):
 
     action.save()
     return JsonResponse(_serialize_mitigation_action(action))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET/POST /api/projects/<id>/contractual-milestones/
+# GET/PATCH/DELETE /api/projects/<id>/contractual-milestones/<milestone_id>/
+# GET /api/projects/<id>/contractual-milestones/<milestone_id>/revisions/
+# ─────────────────────────────────────────────────────────────────────────────
+# Field Dashboard's Contractual Milestone Tracker configuration workflow.
+# Scoped by PROJECT (never by one schedule version — see MilestoneDefinition.
+# project in models.py) so the register survives every later re-import.
+# A contract_required_date is NEVER inferred here from P6 baseline/forecast
+# data; it only exists because a scheduler/PM entered it.
+
+def _serialize_contractual_milestone(m):
+    return {
+        'id': str(m.id), 'projectId': str(m.project_id) if m.project_id else None,
+        'activityId': m.activity_id, 'activityName': m.activity_name,
+        'description': m.description, 'category': m.milestone_category,
+        'isContractual': m.is_contractual,
+        'contractRequiredDate': m.contract_required_date.isoformat() if m.contract_required_date else None,
+        'mustFinishByDate': m.must_finish_by_date.isoformat() if m.must_finish_by_date else None,
+        'allowableVarianceDays': m.allowable_variance_days,
+        'responsibleOrganization': m.responsible_organization,
+        'isCriticalMilestone': m.is_critical_milestone,
+        'hasDocumentedIssue': m.has_documented_issue,
+        'approvalStatus': m.approval_status,
+        'approvedBy': m.approved_by,
+        'approvedAt': m.approved_at.isoformat() if m.approved_at else None,
+        'sourceDocumentReference': m.source_document_reference,
+        'notes': m.notes,
+    }
+
+
+def _serialize_milestone_revision(r):
+    return {
+        'id': str(r.id), 'milestoneId': str(r.milestone_id),
+        'previousDate': r.previous_date.isoformat() if r.previous_date else None,
+        'newDate': r.new_date.isoformat() if r.new_date else None,
+        'sourceDocumentReference': r.source_document_reference, 'reason': r.reason,
+        'changedBy': r.changed_by, 'changedAt': r.changed_at.isoformat(),
+    }
+
+
+@csrf_exempt
+@require_http_methods(['GET', 'POST'])
+def project_contractual_milestones(request, pk):
+    from .models import MILESTONE_CATEGORY_CHOICES, MilestoneDefinition, Project
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    if request.method == 'GET':
+        entries = MilestoneDefinition.objects.filter(project=project).order_by('contract_required_date', 'activity_id')
+        return JsonResponse({
+            'projectId': str(project.id),
+            'configured': entries.exists(),
+            'milestones': [_serialize_contractual_milestone(m) for m in entries],
+        })
+
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    activity_id = (body.get('activityId') or '').strip()
+    if not activity_id:
+        return error_response('activityId is required')
+
+    category = body.get('category') or 'INFORMATIONAL'
+    valid_categories = {c[0] for c in MILESTONE_CATEGORY_CHOICES}
+    if category not in valid_categories:
+        return error_response(f'Unknown category. Valid: {sorted(valid_categories)}')
+
+    contract_required_date = None
+    if body.get('contractRequiredDate'):
+        contract_required_date = parse_date(body['contractRequiredDate'])
+        if contract_required_date is None:
+            return error_response('contractRequiredDate could not be parsed. Use YYYY-MM-DD.')
+
+    entry = MilestoneDefinition.objects.create(
+        project=project, activity_id=activity_id, activity_name=body.get('activityName') or '',
+        description=body.get('description') or '', milestone_category=category,
+        contract_required_date=contract_required_date,
+        must_finish_by_date=parse_date(body['mustFinishByDate']) if body.get('mustFinishByDate') else None,
+        allowable_variance_days=float(body.get('allowableVarianceDays') or 0.0),
+        responsible_organization=body.get('responsibleOrganization') or '',
+        is_critical_milestone=bool(body.get('isCriticalMilestone')),
+        has_documented_issue=bool(body.get('hasDocumentedIssue')),
+        approval_status=body.get('approvalStatus') or '',
+        approved_by=body.get('approvedBy') or '',
+        approved_at=timezone.now() if body.get('approvedBy') else None,
+        source_document_reference=body.get('sourceDocumentReference') or '',
+        notes=body.get('notes') or '',
+    )
+    # A newly-created entry's first date is not a "revision" of a prior
+    # authorized date — only a CHANGE to an existing entry's
+    # contract_required_date is logged (see the PATCH handler below).
+    return JsonResponse(_serialize_contractual_milestone(entry), status=201)
+
+
+@csrf_exempt
+@require_http_methods(['GET', 'PATCH', 'DELETE'])
+def project_contractual_milestone_detail(request, pk, milestone_id):
+    from .models import MILESTONE_CATEGORY_CHOICES, ContractualMilestoneRevision, MilestoneDefinition, Project
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    entry = MilestoneDefinition.objects.filter(pk=milestone_id, project=project).first()
+    if not entry:
+        return error_response('Contractual milestone not found', status=404)
+
+    if request.method == 'GET':
+        return JsonResponse(_serialize_contractual_milestone(entry))
+
+    if request.method == 'DELETE':
+        entry.delete()
+        return JsonResponse({'deleted': True})
+
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    if 'activityId' in body:
+        if not (body['activityId'] or '').strip():
+            return error_response('activityId cannot be blank')
+        entry.activity_id = body['activityId'].strip()
+    if 'activityName' in body:
+        entry.activity_name = body['activityName'] or ''
+    if 'description' in body:
+        entry.description = body['description'] or ''
+    if 'category' in body:
+        valid_categories = {c[0] for c in MILESTONE_CATEGORY_CHOICES}
+        if body['category'] not in valid_categories:
+            return error_response(f'Unknown category. Valid: {sorted(valid_categories)}')
+        entry.milestone_category = body['category']
+    if 'mustFinishByDate' in body:
+        entry.must_finish_by_date = parse_date(body['mustFinishByDate']) if body['mustFinishByDate'] else None
+    if 'allowableVarianceDays' in body:
+        entry.allowable_variance_days = float(body['allowableVarianceDays'] or 0.0)
+    if 'responsibleOrganization' in body:
+        entry.responsible_organization = body['responsibleOrganization'] or ''
+    if 'isCriticalMilestone' in body:
+        entry.is_critical_milestone = bool(body['isCriticalMilestone'])
+    if 'hasDocumentedIssue' in body:
+        entry.has_documented_issue = bool(body['hasDocumentedIssue'])
+    if 'approvalStatus' in body:
+        entry.approval_status = body['approvalStatus'] or ''
+    if 'approvedBy' in body:
+        entry.approved_by = body['approvedBy'] or ''
+        entry.approved_at = timezone.now() if entry.approved_by else None
+
+    # contractRequiredDate is the one field with authorized-change tracking
+    # — an actual change is logged as a ContractualMilestoneRevision,
+    # requiring a source document reference/reason so the change is never
+    # silent. sourceDocumentReference/notes are updated regardless (they
+    # can describe the entry itself without a date change).
+    if 'sourceDocumentReference' in body:
+        entry.source_document_reference = body['sourceDocumentReference'] or ''
+    if 'notes' in body:
+        entry.notes = body['notes'] or ''
+
+    if 'contractRequiredDate' in body:
+        new_date = parse_date(body['contractRequiredDate']) if body['contractRequiredDate'] else None
+        if body['contractRequiredDate'] and new_date is None:
+            return error_response('contractRequiredDate could not be parsed. Use YYYY-MM-DD.')
+        if new_date != entry.contract_required_date:
+            ContractualMilestoneRevision.objects.create(
+                milestone=entry, previous_date=entry.contract_required_date, new_date=new_date,
+                source_document_reference=body.get('revisionSourceDocumentReference') or body.get('sourceDocumentReference') or '',
+                reason=body.get('revisionReason') or '', changed_by=body.get('changedBy') or '',
+            )
+            entry.contract_required_date = new_date
+
+    entry.save()
+    return JsonResponse(_serialize_contractual_milestone(entry))
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def project_contractual_milestone_revisions(request, pk, milestone_id):
+    from .models import MilestoneDefinition, Project
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    entry = MilestoneDefinition.objects.filter(pk=milestone_id, project=project).first()
+    if not entry:
+        return error_response('Contractual milestone not found', status=404)
+
+    return JsonResponse({
+        'milestoneId': str(entry.id),
+        'revisions': [_serialize_milestone_revision(r) for r in entry.revisions.all()],
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/projects/<id>/field-dashboard-summary/
+# ─────────────────────────────────────────────────────────────────────────────
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def project_field_dashboard_summary(request, pk):
+    """
+    Field Dashboard — a presentation/orchestration layer only, same
+    discipline as project_dashboard_summary (Main Dashboard): every number
+    traces to an existing authoritative engine; nothing is recalculated.
+    Reuses activity_analysis.build_activity_analysis (rows — Contractual
+    Milestone Tracker P6 matching and Schedule Health), compute_cost_summary
+    + _compute_budget_breakdown (Current Spend/Budget/Earned Value — the
+    SAME figures /cost-summary/ shows), compute_productivity (hours only —
+    headcount is not computed anywhere in ScheduleIQ and is never derived
+    from hours here), float_intelligence.compute_float_summary (Schedule
+    Health), baseline_progress.build_baseline_progress with
+    scurveMetric='hours' (planned-vs-actual manpower curve, only when
+    genuinely resource-loaded), and the project-scoped Contractual
+    Milestone register (MilestoneDefinition) via contractual_milestones.py.
+
+    Query params: currentVersion/version, previousVersion, baselineVersion
+    (same resolution convention as every other analysis endpoint),
+    warningThresholdDays (the Contractual Milestone Tracker's configurable
+    near-term driving-path warning — default
+    contractual_milestones.DEFAULT_WARNING_THRESHOLD_DAYS, calendar basis
+    documented there).
+    """
+    from .models import MilestoneDefinition, Project
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    ctx = _resolve_analysis_context(project, request)
+    if not ctx:
+        return error_response('No schedule version available for this project', status=404)
+
+    current, previous, baseline = ctx['current'], ctx['previous'], ctx['baseline']
+    current_dd = ctx['current_dd']
+
+    try:
+        warning_threshold_days = float(request.GET.get('warningThresholdDays', contractual_milestones.DEFAULT_WARNING_THRESHOLD_DAYS))
+    except (TypeError, ValueError):
+        return error_response('warningThresholdDays must be a number')
+
+    result = {
+        'projectId': str(project.id), 'available': True,
+        'context': {
+            'currentVersionId': str(current.id),
+            'currentVersionLabel': current.version_label or current.original_filename,
+            'currentDataDate': current_dd.isoformat() if current_dd else None,
+            'previousVersionId': str(previous.id) if previous else None,
+            'previousVersionLabel': (previous.version_label or previous.original_filename) if previous else None,
+            'baselineVersionId': str(baseline.id) if baseline else None,
+            'baselineVersionLabel': (baseline.version_label or baseline.original_filename) if baseline else None,
+            'baselineDesignated': baseline is not None,
+        },
+    }
+
+    # ── Activity Analysis rows — backs the Contractual Milestone Tracker's
+    # P6 matching and Schedule Health ────────────────────────────────────
+    rows = None
+    try:
+        analysis = activity_analysis.build_activity_analysis(
+            current.activities_json,
+            previous_activities=previous.activities_json if previous else None,
+            baseline_activities=baseline.activities_json if baseline else None,
+            current_data_date=current_dd, previous_data_date=ctx['previous_dd'],
+            calendars=ctx['calendars'], calendar_meta=ctx['calendar_meta'],
+            update_intelligence_result=ctx['ui_result'], milestone_report=ctx['milestone_report'],
+        )
+        rows = analysis['rows']
+    except Exception as exc:
+        result['rowsError'] = str(exc)
+
+    # ── compute_cost_summary — backs Financials, Manpower SPI/CPI, and
+    # Schedule Health ────────────────────────────────────────────────────
+    cost_summary = None
+    try:
+        cost_summary = compute_cost_summary(current.activities_json, current_dd)
+    except Exception as exc:
+        result['costSummaryError'] = str(exc)
+
+    # ── Contractual Milestone Tracker (Phase 2) ─────────────────────────
+    try:
+        register_entries = [_serialize_contractual_milestone(m) for m in MilestoneDefinition.objects.filter(project=project)]
+        contractual_entries = [e for e in register_entries if e['isContractual']]
+        if rows is None:
+            result['contractualMilestones'] = {'available': False, 'reason': 'Activity analysis unavailable for this version.'}
+        elif not contractual_entries:
+            result['contractualMilestones'] = {
+                'available': True, 'configured': False,
+                'reason': 'Contractual Dates Not Configured',
+                'milestones': [], 'counts': {'GREEN': 0, 'YELLOW': 0, 'RED': 0, 'UNVERIFIED': 0},
+                'warningThresholdDays': warning_threshold_days,
+            }
+        else:
+            tracker = contractual_milestones.build_contractual_milestone_tracker(
+                contractual_entries, rows, warning_threshold_days, ctx['calendars'],
+            )
+            result['contractualMilestones'] = {'available': True, **tracker}
+    except Exception as exc:
+        result['contractualMilestones'] = {'available': False, 'reason': str(exc)}
+
+    # ── Current Spend / Budget / Earned Value ───────────────────────────
+    try:
+        if cost_summary is None:
+            result['financials'] = {'available': False, 'reason': 'Cost summary unavailable for this version.'}
+        else:
+            breakdown = _compute_budget_breakdown(project, cost_summary)
+            result['financials'] = {
+                'available': True,
+                'currentSpend': breakdown['actuals']['actualCost'],
+                'budget': breakdown['budget']['currentBudget'],
+                'originalBudget': breakdown['budget']['originalBudget'],
+                'approvedBudgetChanges': breakdown['budget']['approvedBudgetChanges'],
+                'earnedValue': {'value': cost_summary['cost']['ev'], 'source': 'imported' if cost_summary['cost']['ev'] is not None else 'unavailable'},
+                'commitments': breakdown['commitments'],
+                'forecast': breakdown['forecast'],
+                'cpi': cost_summary['cost']['cpi'], 'spi': cost_summary['cost']['spi'],
+            }
+    except Exception as exc:
+        result['financials'] = {'available': False, 'reason': str(exc)}
+
+    # ── Manpower (hours only — no headcount engine exists anywhere in
+    # ScheduleIQ; never derived from hours) ─────────────────────────────
+    try:
+        prod = compute_productivity(current.activities_json)
+        result['manpower'] = {
+            'available': bool(prod['overall']['available']),
+            'reason': None if prod['overall']['available'] else 'Unavailable — Schedule is not resource loaded.',
+            'budgetedHours': prod['overall']['budgetedHours'], 'earnedHours': prod['overall']['earnedHours'],
+            'actualHours': prod['overall']['actualHours'], 'remainingHours': prod['overall']['remainingHours'],
+            'spi': cost_summary['hours']['spi'] if cost_summary else None,
+            'cpi': cost_summary['hours']['cpi'] if cost_summary else None,
+            'headcount': {
+                'available': False,
+                'reason': 'Current headcount is not tracked by ScheduleIQ — only man-hours. Provide verified staffing data to enable this.',
+            },
+        }
+    except Exception as exc:
+        result['manpower'] = {'available': False, 'reason': str(exc)}
+
+    # ── Planned vs Actual manpower curve — real time-phased data only ───
+    try:
+        bp = baseline_progress.build_baseline_progress(
+            baseline.activities_json if baseline else [], current.activities_json, current_dd, ctx['calendars'],
+            scurve_metric='hours',
+        )
+        scurve = bp['scurve']
+        result['manpowerCurve'] = {
+            'available': bool(scurve.get('available')),
+            'reason': scurve.get('reason'),
+            'periods': scurve.get('periods') if scurve.get('available') else [],
+        }
+    except Exception as exc:
+        result['manpowerCurve'] = {'available': False, 'reason': str(exc)}
+
+    # ── Spend vs Budget / Earned vs Spend trend — real persisted versions,
+    # never a synthetic trend from one snapshot (same rule project_cost_
+    # history already follows) ──────────────────────────────────────────
+    try:
+        versions = list(project.schedule_versions.exclude(data_date=None).order_by('data_date'))
+        points = []
+        for v in versions:
+            try:
+                s = compute_cost_summary(v.activities_json, v.data_date)
+            except Exception:
+                continue
+            points.append({
+                'versionId': str(v.id), 'versionLabel': v.version_label, 'dataDate': v.data_date.isoformat(),
+                'bac': s['cost']['bac'], 'ac': s['cost']['ac'], 'ev': s['cost']['ev'],
+            })
+        result['spendTrend'] = {'available': len(points) > 0, 'points': points}
+    except Exception as exc:
+        result['spendTrend'] = {'available': False, 'reason': str(exc)}
+
+    # ── Schedule Health ──────────────────────────────────────────────────
+    try:
+        if rows is None:
+            result['scheduleHealth'] = {'available': False, 'reason': 'Activity analysis unavailable for this version.'}
+        else:
+            fs = float_intelligence.compute_float_summary(rows)
+            result['scheduleHealth'] = {
+                'available': True,
+                'criticalCount': fs['criticalCount'], 'drivingCount': fs['drivingCount'],
+                'negativeFloatCount': fs['negativeFloatCount'],
+                'spi': cost_summary['cost']['spi'] if cost_summary else None,
+            }
+    except Exception as exc:
+        result['scheduleHealth'] = {'available': False, 'reason': str(exc)}
+
+    # ── Integration Sources — only Primavera P6 import genuinely exists;
+    # never claim a connection that isn't real ───────────────────────────
+    result['integrationSources'] = {
+        'primaveraP6': {'status': 'CONNECTED', 'detail': 'Imported schedule data drives every ScheduleIQ workspace.'},
+        'shelby': {'status': 'NOT_CONNECTED', 'detail': 'No Shelby integration exists in ScheduleIQ.'},
+        'fieldData': {'status': 'NOT_CONNECTED', 'detail': 'No field-data integration exists in ScheduleIQ.'},
+    }
+
+    # ── Project Issues — no issue-tracking engine exists yet; never
+    # fabricate example issues ───────────────────────────────────────────
+    result['projectIssues'] = {
+        'available': False, 'configured': False, 'issues': [],
+        'reason': 'Project issue tracking is not yet configured in ScheduleIQ.',
+    }
+
+    return JsonResponse(result)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
