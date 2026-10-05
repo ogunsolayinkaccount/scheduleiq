@@ -38,7 +38,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Parser-added provenance fields that differ between two imports of the very
 # same source file (see project_consolidation) - never real content differences.
-PARSER_PROVENANCE_KEYS = frozenset({'origDurSource'})
+# sourceFile in particular is stamped onto every activity from the UPLOADED
+# FILENAME alone (xer_to_activities(sections, upload_file.name)) - two
+# genuinely identical exports saved/re-uploaded under different filenames
+# (extremely common in practice - e.g. a timestamp in the export name) must
+# still fingerprint identically, or exact-duplicate-import detection
+# (import_commit, Phase 2: Import Protection) could never catch them.
+PARSER_PROVENANCE_KEYS = frozenset({'origDurSource', 'sourceFile'})
 
 
 def content_fingerprint(activities: List[dict]) -> str:
@@ -65,8 +71,16 @@ def sort_newest_first(versions) -> list:
 
 
 def chronological_versions(project) -> list:
-    """Every version of `project`, newest first by effective Data Date."""
-    return sort_newest_first(project.schedule_versions.all())
+    """Every NON-DELETED version of `project`, newest first by effective
+    Data Date. This is the single choke-point CURRENT/PREVIOUS/BASELINE
+    resolution, dashboards and comparisons already go through (see
+    _assign_version_roles's callers in views.py) — excluding soft-deleted
+    versions (Phase 3/4: Import Protection and Schedule Deletion Auditing)
+    here means every one of those call sites correctly stops seeing a
+    deleted version without needing its own exclusion logic. Use
+    project.schedule_versions.filter(is_deleted=True) directly (e.g. the
+    Deleted Versions view) when a deleted version is what you actually want."""
+    return sort_newest_first(project.schedule_versions.filter(is_deleted=False))
 
 
 def _distinct_contents(versions) -> int:

@@ -175,8 +175,56 @@ class ScheduleUpload(models.Model):
     upload_timestamp = models.DateTimeField(default=timezone.now)
     uploaded_by = models.CharField(max_length=200, blank=True)
     user_notes = models.TextField(blank=True)
-    file_checksum = models.CharField(max_length=64, blank=True)   # SHA-256 hex
+    file_checksum = models.CharField(max_length=64, blank=True)   # SHA-256 hex of the raw uploaded file bytes
     file_size_bytes = models.BigIntegerField(default=0)
+    # SHA-256 of the PARSED activities_json content (see
+    # version_chronology.content_fingerprint — the same function already
+    # used for duplicate-VERSION detection during project consolidation).
+    # Populated at import time going forward; blank on versions imported
+    # before this field existed — those are never retroactively backfilled
+    # (that would be a write to an existing record), so an exact-duplicate
+    # check against them falls back to computing the fingerprint live from
+    # their stored activities_json rather than trusting this column.
+    content_fingerprint = models.CharField(max_length=64, blank=True, db_index=True)
+
+    # ── Baseline Detection and Intelligence Enhancement — structural facts
+    # about PROJECT-table rows found in the SOURCE XER file at import time
+    # (see xer_baseline_detection.py). These are ADDITIONAL XER PROJECT
+    # RECORDS, not confirmed baselines — standard XER format does not
+    # reliably expose a verifiable "this is a baseline of project X" link,
+    # so ScheduleIQ never labels a count or a record here as a baseline
+    # outright; UI/API language calls them "additional project records" or
+    # "potential baseline references" (e.g. the common, well-documented
+    # case is P6's "Export with Baselines" producing extra PROJECT rows),
+    # never a flat assertion. Purely informational either way: NEVER read
+    # by version_chronology.assign_roles, baseline_progress.py, EVM,
+    # S-curves, or any dashboard KPI, and never changes which version
+    # ScheduleIQ treats as the project's baseline — that remains
+    # schedule_classification alone, a human decision, unaffected by
+    # anything here. Null for every non-XER import (Excel/CSV/XML/PDF have
+    # no PROJECT-table concept) and for any version imported before this
+    # field existed — both cases are genuinely "not available," never
+    # backfilled or guessed.
+    xer_project_record_count = models.IntegerField(null=True, blank=True)
+    xer_additional_project_record_count = models.IntegerField(null=True, blank=True)
+    xer_additional_project_records = models.JSONField(null=True, blank=True)
+
+    # ── Soft delete (Phase 3/4: Import Protection and Schedule Deletion
+    # Auditing) — a schedule version is never hard-deleted by the ordinary
+    # delete workflow anymore. is_deleted=True rows are excluded from
+    # chronological_versions() (see version_chronology.py), which is the
+    # single choke-point CURRENT/PREVIOUS/BASELINE resolution, dashboards,
+    # and comparisons all already go through — so they disappear from every
+    # normal view without each call site needing its own exclusion logic.
+    # They remain real, queryable rows for the Deleted Versions view, the
+    # restore workflow, and project consolidation's repoint logic.
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    # Best-effort only — see AuditLog.user's own caveat: ScheduleIQ has no
+    # real authentication system today, so this is whatever identifier the
+    # caller supplied (often blank), never a fabricated identity.
+    deleted_by = models.CharField(max_length=200, blank=True)
+    delete_reason = models.TextField(blank=True)
 
     # Classification (user must designate — default is CURRENT_UPDATE, never auto-baseline)
     schedule_classification = models.CharField(
@@ -818,11 +866,30 @@ class MitigationAction(models.Model):
         return f'{self.description[:50]} ({self.status})'
 
 
+AUDIT_OUTCOME_CHOICES = [
+    ('SUCCESS', 'Success'),
+    ('REFUSED', 'Refused (validation/confirmation not satisfied)'),
+    ('FAILED', 'Failed (unexpected error)'),
+    ('UNAUTHORIZED', 'Unauthorized'),
+]
+
+
 class AuditLog(models.Model):
-    """Immutable audit trail for every governance action."""
+    """Immutable audit trail for every governance action — existed unused
+    since the initial commit; Phase 3 (Import Protection and Schedule
+    Deletion Auditing) is its first real writer, starting with schedule-
+    version deletion/restore. Never update or delete a row here; a
+    correction is a NEW row, same as every other append-only log."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     timestamp = models.DateTimeField(default=timezone.now)
+    # Phase 3 (Authentication and Authorization): every endpoint that writes
+    # here now runs behind real Django session authentication, so this is
+    # always request.user.username for an authenticated request — NEVER a
+    # caller-supplied body field (that was the exact gap this phase closes:
+    # a request body can no longer claim an identity it didn't
+    # authenticate as). Blank values that predate this phase remain as they
+    # were recorded — honest history, never rewritten.
     user = models.CharField(max_length=200, blank=True)
     action = models.CharField(max_length=100)
     object_type = models.CharField(max_length=100)
@@ -831,16 +898,68 @@ class AuditLog(models.Model):
     new_value = models.JSONField(null=True, blank=True)
     reason = models.TextField(blank=True)
     approval_reference = models.CharField(max_length=200, blank=True)
+    outcome = models.CharField(max_length=20, choices=AUDIT_OUTCOME_CHOICES, default='SUCCESS')
+    # Correlates one logical client action (e.g. one delete-button click,
+    # including a double-click's two requests) across rows — the caller's
+    # own idempotency/correlation id if supplied, else generated server-side
+    # per request so every attempt is still individually traceable.
+    request_id = models.CharField(max_length=100, blank=True)
 
     class Meta:
         ordering = ['-timestamp']
         indexes = [
             models.Index(fields=['object_type', 'object_id']),
             models.Index(fields=['timestamp']),
+            models.Index(fields=['request_id']),
         ]
 
     def __str__(self):
-        return f'{self.timestamp} — {self.action} on {self.object_type}/{self.object_id}'
+        return f'{self.timestamp} — {self.action} on {self.object_type}/{self.object_id} ({self.outcome})'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 (Authentication and Authorization) — role-based access control.
+# Uses Django's own auth.User (AUTH_USER_MODEL left at the default) rather
+# than a custom user model; a role is additive metadata on top of it, not a
+# replacement for it. See scheduler/permissions.py for how the role is
+# enforced and scheduler/signals.py for how a profile is created.
+# ─────────────────────────────────────────────────────────────────────────────
+from django.conf import settings as _django_settings  # noqa: E402  (grouped with this section, not the file's top-level imports, since nothing above needs it)
+
+ROLE_ADMINISTRATOR = 'ADMINISTRATOR'
+ROLE_SCHEDULER = 'SCHEDULER'
+ROLE_VIEWER = 'VIEWER'
+
+ROLE_CHOICES = [
+    (ROLE_ADMINISTRATOR, 'Administrator — user management, project administration, destructive operations'),
+    (ROLE_SCHEDULER, 'Scheduler — imports, schedule updates, analysis, day-to-day project management'),
+    (ROLE_VIEWER, 'Viewer — read-only access'),
+]
+
+# Ascending privilege — used by permissions.py to check "at least this role"
+# rather than an exact match, so Administrator can do anything Scheduler can,
+# and Scheduler anything Viewer can.
+ROLE_RANK = {ROLE_VIEWER: 0, ROLE_SCHEDULER: 1, ROLE_ADMINISTRATOR: 2}
+
+
+class UserProfile(models.Model):
+    """One row per Django auth.User, added by a post_save signal the moment
+    the User is created (see scheduler/signals.py) — never created lazily on
+    first access, so `request.user.profile` is always safe to read once a
+    User exists. Defaults to VIEWER (least privilege) unless the User is a
+    superuser (created via `createsuperuser`), which is promoted to
+    ADMINISTRATOR automatically — that is the ONLY account this codebase
+    ever grants elevated privilege to without an explicit, separate action
+    by an existing Administrator (see the Phase 3 report for the bootstrap
+    procedure); there is no default/hardcoded account or password anywhere.
+    """
+    user = models.OneToOneField(_django_settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=ROLE_VIEWER)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.user.username} ({self.role})'
 
 
 REPORT_TYPE_CHOICES = [

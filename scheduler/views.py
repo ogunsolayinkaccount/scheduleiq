@@ -1,13 +1,16 @@
+import hashlib
 import json
 import os
 import re
 import time
+import uuid
 from datetime import date as _date_type, timedelta
 
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
-from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST, require_http_methods
+
+from .permissions import require_role
 
 from .utils import (
     compute_metrics,
@@ -34,6 +37,7 @@ from .quality_engine import assess_quality
 from .narrative_engine import generate_narrative
 from .column_mapping import build_activities_from_mapping, build_activities_preview, build_excel_preview
 from .schedule_metadata import compute_upload_metadata, derive_version_label, PARSER_VERSION
+from .xer_baseline_detection import detect_additional_xer_project_records
 from .data_date_detection import (
     detect_data_date_pdf, detect_data_date_tabular, detect_data_date_xer, resolve_effective_data_date,
 )
@@ -148,7 +152,7 @@ def _calendar_meta_for(*schedule_uploads):
     return meta
 
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def upload(request):
     upload_file = request.FILES.get("file")
@@ -272,7 +276,7 @@ def upload(request):
         return error_response(f"Unable to parse file: {str(exc)} | {traceback.format_exc()[-800:]}", status=422)
 
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def metrics(request):
     try:
@@ -324,7 +328,7 @@ def metrics(request):
 # POST /api/analyze/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def analyze(request):
     """
@@ -422,7 +426,7 @@ def analyze(request):
 # POST /api/quality/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def quality(request):
     """
@@ -473,7 +477,7 @@ def quality(request):
 # POST /api/threshold-profiles/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def threshold_profiles(request):
     try:
@@ -518,7 +522,7 @@ def threshold_profiles(request):
 # PUT /api/threshold-profiles/<pk>/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER', PUT='SCHEDULER', PATCH='SCHEDULER')
 @require_http_methods(['GET', 'PUT', 'PATCH'])
 def threshold_profile_detail(request, pk):
     try:
@@ -555,7 +559,7 @@ def threshold_profile_detail(request, pk):
 # POST /api/narrative/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def narrative(request):
     """
@@ -760,11 +764,19 @@ def _read_file_for_import(upload_file):
         preview = build_activities_preview(activities, upload_file.name, 'XER')
         project_meta = parse_project_meta_from_xer(sections)
         preview['dataDateDetection'] = detect_data_date_xer(project_meta)
+        # Baseline Detection and Intelligence Enhancement — structural scan
+        # of the file's own PROJECT-table rows. Read-only, advisory, never
+        # blocks or alters the import in any way. These are ADDITIONAL
+        # project records (potential baseline references), never asserted
+        # as confirmed baselines — see xer_baseline_detection.py.
+        xer_project_record_info = detect_additional_xer_project_records(sections)
+        preview['xerProjectRecordInfo'] = xer_project_record_info
         extra = {
             'import_method': 'xer_parser',
             'project_meta': project_meta,
             'reference_data': extract_xer_reference_data(sections),
             'wbs_node_count': len(sections.get('PROJWBS', [])),
+            'xer_project_record_info': xer_project_record_info,
         }
         return activities, extension, preview, extra
 
@@ -871,7 +883,7 @@ def _identity_reference_version(project_id, reference_version_id):
 
     if not reference_version_id:
         return None
-    return ScheduleUpload.objects.filter(pk=reference_version_id, project_id=project_id).first()
+    return ScheduleUpload.objects.filter(pk=reference_version_id, project_id=project_id, is_deleted=False).first()
 
 
 def _scan_projects_for_identity_candidate(uploaded_activities, uploaded_p6_id, uploaded_p6_name):
@@ -930,7 +942,7 @@ def _scan_projects_for_identity_candidate(uploaded_activities, uploaded_p6_id, u
     return best
 
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def import_preview(request):
     """
@@ -989,6 +1001,10 @@ def import_preview(request):
     preview['activityCount'] = stats['activity_count']
     preview['relationshipCount'] = stats['relationship_count']
     preview['milestoneCount'] = stats['milestone_count']
+    # Baseline Detection — always present in the response (null for any
+    # non-XER format, which has no PROJECT-table concept at all) so the
+    # frontend never has to special-case a missing key.
+    preview.setdefault('xerProjectRecordInfo', None)
 
     project_meta = extra.get('project_meta') or {}
     uploaded_p6_id = project_meta.get('project_id') or ''
@@ -1094,7 +1110,7 @@ def import_preview(request):
 # POST /api/import/commit/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def import_commit(request):
     """
@@ -1104,10 +1120,37 @@ def import_commit(request):
     plus projectId/scheduleUploadId for the Import Center and future phases.
 
     Body (multipart/form-data):
-      file           required  the schedule file
-      projectId      optional  attach to an existing Project
-      projectName    optional  name for a newly created Project (defaults to filename)
-      classification optional  ScheduleUpload.schedule_classification (default CURRENT_UPDATE)
+      file                    required  the schedule file
+      projectId               optional  attach to an existing Project
+      projectName             optional  name for a newly created Project (defaults to filename)
+      classification          optional  ScheduleUpload.schedule_classification (default CURRENT_UPDATE)
+      confirmNewProject       optional  'true' — proceed with creating a NEW project even though
+                               the Import Identity Guard found an existing project this file
+                               structurally matches (no projectId given). Without it, that case
+                               returns 409 MATCHING_PROJECT_FOUND instead of creating anything.
+      confirmDuplicateImport  optional  'true' — proceed even though this file's parsed content is
+                               an exact match (see version_chronology.content_fingerprint) of a
+                               version already on the destination project. Without it, that case
+                               returns 409 EXACT_DUPLICATE_IMPORT instead of creating anything.
+      confirmIdentityMismatch optional  'true' — proceed even though the Schedule Identity Evaluator
+                               could not confidently confirm this upload as the next version of the
+                               destination project (projectId given). Without it, that case returns
+                               409 SCHEDULE_IDENTITY_UNCERTAIN instead of creating anything.
+
+    Phase 2 (Import Protection): every check above runs here, server-side,
+    regardless of what import_preview already showed — a direct API call
+    that skips the preview step cannot bypass identity/duplicate protection.
+    The whole project-resolution + duplicate/identity check + persistence
+    sequence is one atomic transaction; for an existing destination project
+    it additionally takes a row lock (select_for_update) on that Project so
+    two concurrent/double-click commits to the same project cannot both
+    pass the duplicate check before either one's row exists. A brand-new
+    project has no row to lock on yet, so a short-lived cache key keyed by
+    the file's own content fingerprint stands in for one (see
+    new_project_lock_key below) — a known limitation: this only serializes
+    within a single process (Django's default LocMemCache), not across
+    multiple WSGI workers/machines; the DB-level duplicate check that runs
+    on every subsequent commit is the backstop for that wider case.
     """
     upload_file = request.FILES.get('file')
     if not upload_file:
@@ -1134,100 +1177,212 @@ def import_commit(request):
         return v.isoformat() if isinstance(v, _date_type) else v
 
     safe_acts = [{k: _safe(v) for k, v in a.items()} for a in activities]
+    uploaded_fingerprint = version_chronology.content_fingerprint(safe_acts)
+
+    # Raw-bytes checksum of the source file itself — independent of (and a
+    # complement to) the parsed-content fingerprint above: two uploads can
+    # be byte-identical even if content_fingerprint is what actually decides
+    # "exact duplicate" below. _read_file_for_import already consumed the
+    # stream for some formats (e.g. .xer calls upload_file.read()), so seek
+    # back to the start first and restore it afterwards for anything below
+    # that still reads upload_file (e.g. upload_file.size, .name).
+    upload_file.seek(0)
+    file_checksum = hashlib.sha256(upload_file.read()).hexdigest()
+    upload_file.seek(0)
 
     from .models import (
         ActivityCode, ActivityCodeType, Calendar, Project, SCHEDULE_CLASSIFICATION_CHOICES,
         ScheduleUpload, UDFType,
     )
 
-    if project_id:
-        # Explicit "add to existing project" — never silently fall back to
-        # creating a new project if the id doesn't resolve (e.g. deleted
-        # mid-flow); the caller asked for a specific destination.
-        project = Project.objects.filter(pk=project_id).first()
-        if project is None:
-            return error_response('Destination project not found. Choose an existing project or import as a new project.', status=404)
-    else:
-        project = Project.objects.create(name=project_name or os.path.splitext(upload_file.name)[0])
-
-    valid_classifications = {c[0] for c in SCHEDULE_CLASSIFICATION_CHOICES}
-    if classification not in valid_classifications:
-        classification = 'CURRENT_UPDATE'
-
-    # ── Phase 1.5: derive ScheduleUpload metadata from what was actually parsed ──
-    stats = compute_upload_metadata(safe_acts)
     project_meta = extra.get('project_meta') or {}
     reference_data = extra.get('reference_data')
+    uploaded_p6_id = project_meta.get('project_id') or ''
+    uploaded_p6_name = project_meta.get('project_name') or None
+    # Baseline Detection — None for every non-XER format (extra has no such
+    # key), persisted as-is below; never backfilled for older rows.
+    xer_project_record_info = extra.get('xer_project_record_info')
 
-    # ── Data Date: detected-from-file, reviewed, optionally overridden ───────
-    # preview['dataDateDetection'] (data_date_detection.py) is the single
-    # source of "what the file itself says" across every format — XER's
-    # PROJECT.last_recalc_date, an Excel/CSV labeled cell, or a PDF's
-    # "Data Date:" text. The optional `dataDate` POST field is what the user
-    # left in the Import Preview's editable field (defaults to the detected
-    # value client-side, but the server never trusts that default blindly —
-    # it compares against its own detection to decide data_date_overridden).
-    detection = preview.get('dataDateDetection') or {}
-    detected_iso = detection.get('detectedDataDate')
-    detected_source = detection.get('source') or ''
-    detected_confidence = detection.get('confidence') or ''
-    source_data_date = parse_date(detected_iso) if detected_iso else None
+    confirm_new_project = request.POST.get('confirmNewProject') in ('true', '1', 'True')
+    confirm_duplicate_import = request.POST.get('confirmDuplicateImport') in ('true', '1', 'True')
+    confirm_identity_mismatch = request.POST.get('confirmIdentityMismatch') in ('true', '1', 'True')
 
-    user_data_date_raw = (request.POST.get('dataDate') or '').strip()
-    if user_data_date_raw:
-        user_data_date = parse_date(user_data_date_raw)
-        if user_data_date is None:
-            return error_response('dataDate could not be parsed. Use YYYY-MM-DD.')
-        if source_data_date is not None and user_data_date == source_data_date:
-            data_date = user_data_date
+    from django.core.cache import cache
+    from django.db import transaction
+
+    new_project_lock_key = None
+    if not project_id:
+        # Import Identity Guard, enforced HERE (not only in import_preview) —
+        # a direct API call that skips the preview step must still be caught
+        # before "Create New Project" happens unconditionally.
+        identity_candidate = _scan_projects_for_identity_candidate(
+            uploaded_activities=activities, uploaded_p6_id=uploaded_p6_id or None, uploaded_p6_name=uploaded_p6_name,
+        )
+        if identity_candidate is not None and not confirm_new_project:
+            return JsonResponse({
+                'error': 'MATCHING_PROJECT_FOUND',
+                'message': (
+                    f'This file structurally matches the existing project "{identity_candidate["projectName"]}" '
+                    f'({identity_candidate["identity"]["classification"]}). Add it as a schedule version to that '
+                    f'project instead, or resubmit with confirmNewProject=true to create a new project anyway.'
+                ),
+                'identityCandidate': identity_candidate,
+                'requiresConfirmation': 'confirmNewProject',
+            }, status=409)
+
+        # A brand-new project has no existing row to lock on (unlike the
+        # select_for_update below), so a short-lived cache key keyed by the
+        # file's own content fingerprint stands in for one — closes the
+        # double-click/concurrent-submission window for "create new project"
+        # specifically (see docstring for this function's known limitation).
+        new_project_lock_key = f'scheduleiq:import-commit-new-project:{uploaded_fingerprint}'
+        if not cache.add(new_project_lock_key, '1', timeout=20):
+            return JsonResponse({
+                'error': 'DUPLICATE_SUBMISSION_IN_PROGRESS',
+                'message': 'An identical import is already being processed. Check Import Center before retrying.',
+            }, status=409)
+
+    try:
+      with transaction.atomic():
+        if project_id:
+            # select_for_update serializes concurrent commits to the SAME
+            # destination project — the second of two double-click requests
+            # blocks here until the first one's row actually exists, so the
+            # duplicate check just below can never be raced past.
+            project = Project.objects.select_for_update().filter(pk=project_id).first()
+            if project is None:
+                return error_response('Destination project not found. Choose an existing project or import as a new project.', status=404)
+
+            # Exact-duplicate detection — content_fingerprint hashes the
+            # PARSED activities (same function project_consolidation.py
+            # already uses for duplicate-version detection), so two uploads
+            # that are byte-different but structurally identical still match,
+            # while a legitimately revised schedule (different activity
+            # data, same project identity) never does.
+            duplicate_match = next((
+                v for v in ScheduleUpload.objects.filter(project=project, is_deleted=False)
+                if (v.content_fingerprint or version_chronology.content_fingerprint(v.activities_json)) == uploaded_fingerprint
+            ), None)
+            if duplicate_match is not None and not confirm_duplicate_import:
+                return JsonResponse({
+                    'error': 'EXACT_DUPLICATE_IMPORT',
+                    'message': (
+                        f'This file is an exact content duplicate of the existing version '
+                        f'"{duplicate_match.version_label or duplicate_match.original_filename}". '
+                        f'Resubmit with confirmDuplicateImport=true to import it anyway.'
+                    ),
+                    'projectId': str(project.id), 'matchingVersionId': str(duplicate_match.id),
+                    'matchingVersionLabel': duplicate_match.version_label or duplicate_match.original_filename,
+                    'requiresConfirmation': 'confirmDuplicateImport',
+                }, status=409)
+
+            # Schedule Identity Evaluator, enforced here too (not only
+            # advisory in import_preview) — never rejects a legitimate
+            # revised schedule merely for sharing a P6 Project ID; only
+            # blocks when the evaluator itself could not confidently
+            # classify this upload as the next version of THIS project.
+            ctx = _destination_project_context(project_id)
+            reference_version = _identity_reference_version(project_id, ctx['currentVersionId']) if ctx else None
+            if reference_version is not None:
+                identity_result = schedule_identity.evaluate_schedule_identity(
+                    reference_activities=reference_version.activities_json,
+                    reference_p6_id=ctx['existingP6ProjectId'], reference_p6_name=ctx['existingP6ProjectName'],
+                    uploaded_activities=activities, uploaded_p6_id=uploaded_p6_id or None,
+                    uploaded_p6_name=uploaded_p6_name, reference_version_label=ctx['currentVersionLabel'],
+                )
+                if identity_result['confirmationRequired'] and not confirm_identity_mismatch:
+                    return JsonResponse({
+                        'error': 'SCHEDULE_IDENTITY_UNCERTAIN',
+                        'message': (
+                            'This upload could not be confidently confirmed as the next version of the '
+                            'selected project. Review the identity assessment, then resubmit with '
+                            'confirmIdentityMismatch=true to add it anyway.'
+                        ),
+                        'projectId': str(project.id), 'scheduleIdentity': identity_result,
+                        'requiresConfirmation': 'confirmIdentityMismatch',
+                    }, status=409)
+        else:
+            project = Project.objects.create(name=project_name or os.path.splitext(upload_file.name)[0])
+
+        valid_classifications = {c[0] for c in SCHEDULE_CLASSIFICATION_CHOICES}
+        if classification not in valid_classifications:
+            classification = 'CURRENT_UPDATE'
+
+        # ── Phase 1.5: derive ScheduleUpload metadata from what was actually parsed ──
+        stats = compute_upload_metadata(safe_acts)
+
+        # ── Data Date: detected-from-file, reviewed, optionally overridden ───────
+        # preview['dataDateDetection'] (data_date_detection.py) is the single
+        # source of "what the file itself says" across every format — XER's
+        # PROJECT.last_recalc_date, an Excel/CSV labeled cell, or a PDF's
+        # "Data Date:" text. The optional `dataDate` POST field is what the user
+        # left in the Import Preview's editable field (defaults to the detected
+        # value client-side, but the server never trusts that default blindly —
+        # it compares against its own detection to decide data_date_overridden).
+        detection = preview.get('dataDateDetection') or {}
+        detected_iso = detection.get('detectedDataDate')
+        detected_source = detection.get('source') or ''
+        detected_confidence = detection.get('confidence') or ''
+        source_data_date = parse_date(detected_iso) if detected_iso else None
+
+        user_data_date_raw = (request.POST.get('dataDate') or '').strip()
+        if user_data_date_raw:
+            user_data_date = parse_date(user_data_date_raw)
+            if user_data_date is None:
+                return error_response('dataDate could not be parsed. Use YYYY-MM-DD.')
+            if source_data_date is not None and user_data_date == source_data_date:
+                data_date = user_data_date
+                data_date_overridden = False
+                data_date_source = detected_source
+                data_date_confidence = detected_confidence
+            else:
+                data_date = user_data_date
+                data_date_overridden = True
+                data_date_source = 'USER_ENTERED'
+                data_date_confidence = ''
+        else:
+            # No explicit value posted — auto-accept the detected date (or None
+            # if nothing was detected; never the upload timestamp or today).
+            data_date = source_data_date
             data_date_overridden = False
             data_date_source = detected_source
             data_date_confidence = detected_confidence
-        else:
-            data_date = user_data_date
-            data_date_overridden = True
-            data_date_source = 'USER_ENTERED'
-            data_date_confidence = ''
-    else:
-        # No explicit value posted — auto-accept the detected date (or None
-        # if nothing was detected; never the upload timestamp or today).
-        data_date = source_data_date
-        data_date_overridden = False
-        data_date_source = detected_source
-        data_date_confidence = detected_confidence
 
-    planned_start = project_meta.get('planned_start') or stats.get('planned_start')
-    forecast_finish = project_meta.get('forecast_finish') or stats.get('forecast_finish')
-    must_finish_by = project_meta.get('must_finish_by')
-    baseline_finish = stats.get('baseline_finish')
+        planned_start = project_meta.get('planned_start') or stats.get('planned_start')
+        forecast_finish = project_meta.get('forecast_finish') or stats.get('forecast_finish')
+        must_finish_by = project_meta.get('must_finish_by')
+        baseline_finish = stats.get('baseline_finish')
 
-    calendar_names_from_activities = {
-        a.get('calendarName') or a.get('calendar')
-        for a in safe_acts if a.get('calendarName') or a.get('calendar')
-    }
-    calendar_count = (
-        len(reference_data['calendars']) if reference_data else len(calendar_names_from_activities)
-    )
-    wbs_node_count = extra.get('wbs_node_count')
-    if wbs_node_count is None:
-        wbs_node_count = len({a.get('wbs') for a in safe_acts if a.get('wbs')})
+        calendar_names_from_activities = {
+            a.get('calendarName') or a.get('calendar')
+            for a in safe_acts if a.get('calendarName') or a.get('calendar')
+        }
+        calendar_count = (
+            len(reference_data['calendars']) if reference_data else len(calendar_names_from_activities)
+        )
+        wbs_node_count = extra.get('wbs_node_count')
+        if wbs_node_count is None:
+            wbs_node_count = len({a.get('wbs') for a in safe_acts if a.get('wbs')})
 
-    version_label = version_label_override or derive_version_label(data_date, timezone.now())
+        version_label = version_label_override or derive_version_label(data_date, timezone.now())
 
-    # upload_timestamp drives CURRENT/PREVIOUS role assignment (see
-    # _assign_version_roles) via `-upload_timestamp` ordering. On fast
-    # imports (rapid successive commits, e.g. scripted bulk import or
-    # back-to-back test requests) timezone.now()'s clock resolution can tie
-    # two rows, making that ordering non-deterministic. Guarantee strictly
-    # increasing timestamps per project so import order is always preserved.
-    upload_ts = timezone.now()
-    if project is not None:
-        latest = ScheduleUpload.objects.filter(project=project).order_by('-upload_timestamp').first()
-        if latest is not None and upload_ts <= latest.upload_timestamp:
-            upload_ts = latest.upload_timestamp + timedelta(microseconds=1)
+        # upload_timestamp drives CURRENT/PREVIOUS role assignment (see
+        # _assign_version_roles) via `-upload_timestamp` ordering. On fast
+        # imports (rapid successive commits, e.g. scripted bulk import or
+        # back-to-back test requests) timezone.now()'s clock resolution can tie
+        # two rows, making that ordering non-deterministic. Guarantee strictly
+        # increasing timestamps per project so import order is always preserved.
+        upload_ts = timezone.now()
+        if project is not None:
+            latest = ScheduleUpload.objects.filter(project=project).order_by('-upload_timestamp').first()
+            if latest is not None and upload_ts <= latest.upload_timestamp:
+                upload_ts = latest.upload_timestamp + timedelta(microseconds=1)
 
-    schedule_upload = None
-    try:
+        # No more best-effort swallowing here (Phase 2 fix) — a persistence
+        # failure now rolls back this whole transaction (so no orphaned empty
+        # Project is left behind) and is caught by the except block below,
+        # which returns a real error instead of a fake-success 200 with
+        # scheduleUploadId: null.
         schedule_upload = ScheduleUpload.objects.create(
             project=project,
             upload_timestamp=upload_ts,
@@ -1235,6 +1390,11 @@ def import_commit(request):
             sanitized_filename=re.sub(r'[^A-Za-z0-9_.-]', '_', upload_file.name),
             file_type=extension.lstrip('.').upper(),
             file_size_bytes=upload_file.size,
+            file_checksum=file_checksum,
+            content_fingerprint=uploaded_fingerprint,
+            xer_project_record_count=(xer_project_record_info or {}).get('projectRecordCount'),
+            xer_additional_project_record_count=(xer_project_record_info or {}).get('additionalProjectRecordCount'),
+            xer_additional_project_records=(xer_project_record_info or {}).get('additionalProjectRecords'),
             project_id_in_file=project_meta.get('project_id', ''),
             project_name_in_file=project_meta.get('project_name', ''),
             data_date=data_date,
@@ -1300,33 +1460,36 @@ def import_commit(request):
                 UDFType.objects.bulk_create([
                     UDFType(schedule_upload=schedule_upload, **u) for u in reference_data['udf_types']
                 ])
-    except Exception:
-        # Persistence is best-effort — the import must still succeed for the
-        # frontend even if the DB write fails (e.g. migrations not yet applied).
-        schedule_upload = None
 
-    base_name = os.path.splitext(upload_file.name)[0]
-    response = {
-        'id': f'{base_name}-{int(time.time() * 1000)}',
-        'name': base_name,
-        'file': upload_file.name,
-        'source': extension.lstrip('.'),
-        'sourceFile': upload_file.name,
-        'activities': safe_acts,
-        'actCount': len(safe_acts),
-        'projectId': str(project.id) if project else None,
-        'projectName': project.name if project else None,
-        'scheduleUploadId': str(schedule_upload.id) if schedule_upload else None,
-        'versionLabel': version_label,
-        'importWarnings': preview.get('warnings', []),
-        # Effective Data Date this version was committed with — lets the
-        # frontend update the toolbar Data Date immediately without a
-        # redundant follow-up request. See data_date_detection.py.
-        'dataDate': data_date.isoformat() if data_date else None,
-        'sourceDataDate': source_data_date.isoformat() if source_data_date else None,
-        'dataDateOverridden': data_date_overridden,
-    }
-    payload = json.dumps(response, default=str)
+        base_name = os.path.splitext(upload_file.name)[0]
+        response_payload = {
+            'id': f'{base_name}-{int(time.time() * 1000)}',
+            'name': base_name,
+            'file': upload_file.name,
+            'source': extension.lstrip('.'),
+            'sourceFile': upload_file.name,
+            'activities': safe_acts,
+            'actCount': len(safe_acts),
+            'projectId': str(project.id) if project else None,
+            'projectName': project.name if project else None,
+            'scheduleUploadId': str(schedule_upload.id) if schedule_upload else None,
+            'versionLabel': version_label,
+            'importWarnings': preview.get('warnings', []),
+            # Effective Data Date this version was committed with — lets the
+            # frontend update the toolbar Data Date immediately without a
+            # redundant follow-up request. See data_date_detection.py.
+            'dataDate': data_date.isoformat() if data_date else None,
+            'sourceDataDate': source_data_date.isoformat() if source_data_date else None,
+            'dataDateOverridden': data_date_overridden,
+        }
+    except Exception as exc:
+        import traceback
+        return error_response(f'Failed to save import: {exc} | {traceback.format_exc()[-800:]}', status=500)
+    finally:
+        if new_project_lock_key:
+            cache.delete(new_project_lock_key)
+
+    payload = json.dumps(response_payload, default=str)
     return HttpResponse(payload, content_type='application/json')
 
 
@@ -1335,7 +1498,7 @@ def import_commit(request):
 # POST /api/projects/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def projects(request):
     from .models import Project
@@ -1416,7 +1579,7 @@ def _delete_project(project):
     return {'deleted': True, 'projectId': pid, 'projectName': name, 'removed': removed}
 
 
-@csrf_exempt
+@require_role('VIEWER', DELETE='ADMINISTRATOR')
 @require_http_methods(['GET', 'DELETE'])
 def project_detail(request, pk):
     """GET: project + version list. DELETE: the ONLY way a project stops
@@ -1509,7 +1672,7 @@ def classify_projects_against_main_app(app_files):
     return out
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['POST'])
 def projects_reconcile(request):
     """Body: {mainAppFiles: [{projectId, scheduleUploadId, name}]}. READ-ONLY.
@@ -1543,7 +1706,7 @@ def projects_reconcile(request):
 # POST /api/projects/consolidation-plan/   (READ-ONLY dry-run)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['POST'])
 def projects_consolidation_plan(request):
     """Sync Intelligence consolidation DRY-RUN. Body (all optional):
@@ -1570,7 +1733,7 @@ def projects_consolidation_plan(request):
 # POST /api/projects/consolidation-simulate/   (always rolled back)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['POST'])
 def projects_consolidation_simulate(request):
     """Runs the exact consolidation for {nameContains, mainAppFiles} inside a
@@ -1590,7 +1753,7 @@ def projects_consolidation_simulate(request):
 # POST /api/projects/consolidation-apply/   (confirmation-gated, all-or-nothing)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('ADMINISTRATOR')
 @require_http_methods(['POST'])
 def projects_consolidation_apply(request):
     """Executes a previously reviewed consolidation plan. Requires:
@@ -1616,7 +1779,7 @@ def projects_consolidation_apply(request):
 # POST /api/projects/version-difference-report/   (READ-ONLY)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['POST'])
 def version_difference_report(request):
     """Body: {versionA, versionB, sample?}. Deterministic report of what
@@ -1721,7 +1884,7 @@ def _serialize_versions(project):
 # GET /api/projects/<id>/versions/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_versions(request, pk):
     """
@@ -1749,29 +1912,85 @@ def _current_role(project, version):
     return roles.get(str(version.id), 'OTHER')
 
 
-def _delete_schedule_version(project, version):
-    """Deletes ONE schedule version. Dependent records are handled by the
-    models' existing on_delete rules: version-owned data (milestone
-    definitions, calendars, activity codes, UDFs, cost accounts, analyses
-    where it is the current upload, recovery scenarios built on it)
-    cascades; project-level records that merely reference it (saved report
-    snapshots, documents, manual cost entries, risk first-identified
-    pointers, mitigation-action links, analysis baseline/previous
-    pointers) are detached (SET_NULL) rather than deleted. Nothing
-    belonging to another surviving version is touched.
+DELETE_CONFIRMATION_PHRASE = 'DELETE'
+RESTORE_CONFIRMATION_PHRASE = 'RESTORE'
+# Documented, NOT YET ENFORCED retention policy (Phase 4 explicitly defers
+# automatic permanent deletion — this is only exposed to callers as
+# daysUntilPurge/retentionDeadline so a future phase can act on it; nothing
+# in this codebase purges anything on its own today).
+DELETED_VERSION_RETENTION_DAYS = 90
 
-    CURRENT/PREVIOUS/BASELINE are never stored (see
-    _assign_version_roles — computed from classification + upload order),
-    so there is nothing to reassign: they re-resolve from the survivors on
-    the next read. In particular, deleting the version classified as the
-    baseline leaves NO baseline until one is explicitly designated via the
-    existing classification PATCH — no version is auto-promoted."""
-    from django.db import transaction
 
+def _write_audit_log(user, action, object_type, object_id, outcome='SUCCESS',
+                      previous_value=None, new_value=None, reason='', approval_reference='', request_id=''):
+    """Appends one row to AuditLog (models.py) — an immutable, append-only
+    record that has existed unused since the initial commit. Never update
+    or delete an existing row; a correction is always a NEW row. `user` is
+    whatever identifier the caller supplied, possibly blank — ScheduleIQ
+    has no real authentication system today (see the Phase 3 audit), so
+    this NEVER fabricates an identity. Best-effort: a logging failure must
+    never block the action it is recording, so this swallows its own
+    exceptions after attempting the write."""
+    from .models import AuditLog
+    try:
+        AuditLog.objects.create(
+            user=(user or '')[:200], action=action, object_type=object_type, object_id=str(object_id),
+            outcome=outcome, previous_value=previous_value, new_value=new_value,
+            reason=reason or '', approval_reference=approval_reference or '', request_id=(request_id or '')[:100],
+        )
+    except Exception:
+        pass
+
+
+def _delete_schedule_version(project, version, confirmation=None, reason='', user='', request_id=''):
+    """Soft-deletes ONE schedule version (Phase 3/4: Import Protection and
+    Schedule Deletion Auditing) — no row is ever actually removed from the
+    database by this function anymore. Sets is_deleted/deleted_at/
+    deleted_by/delete_reason and writes an AuditLog entry either way
+    (REFUSED when confirmation is missing/wrong, SUCCESS otherwise), so a
+    failed or unauthorized attempt is always distinguishable from a real
+    deletion in the audit trail.
+
+    Every dependent record (milestone definitions, calendars, activity
+    codes, UDFs, cost accounts, analyses, recovery scenarios, reports,
+    documents, manual cost entries, risk/mitigation links) is left
+    completely untouched — this is no longer a delete from their point of
+    view, since the ScheduleUpload row itself still exists. The ONLY
+    behavioral effect elsewhere is that chronological_versions() (see
+    version_chronology.py) stops returning this row, so CURRENT/PREVIOUS/
+    BASELINE resolution, dashboards and comparisons all stop seeing it
+    without any of their own code changing."""
     was_role = _current_role(project, version)
     label = version.version_label or version.original_filename
-    with transaction.atomic():
-        version.delete()
+    data_date_iso = version.data_date.isoformat() if version.data_date else None
+
+    if confirmation != DELETE_CONFIRMATION_PHRASE:
+        _write_audit_log(
+            user, 'DELETE_SCHEDULE_VERSION', 'ScheduleUpload', version.id, outcome='REFUSED',
+            reason=reason or 'Missing or incorrect confirmation phrase.', request_id=request_id,
+            new_value={'projectId': str(project.id), 'versionLabel': label, 'dataDate': data_date_iso},
+        )
+        return JsonResponse({
+            'error': f'Deletion requires confirmation="{DELETE_CONFIRMATION_PHRASE}".',
+            'projectId': str(project.id), 'versionId': str(version.id), 'versionLabel': label,
+            'dataDate': data_date_iso, 'currentRole': was_role,
+        }, status=400)
+
+    version.is_deleted = True
+    version.deleted_at = timezone.now()
+    version.deleted_by = (user or '')[:200]
+    version.delete_reason = reason or ''
+    version.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'delete_reason'])
+
+    _write_audit_log(
+        user, 'DELETE_SCHEDULE_VERSION', 'ScheduleUpload', version.id, outcome='SUCCESS',
+        reason=reason, request_id=request_id,
+        previous_value={'isDeleted': False},
+        new_value={
+            'isDeleted': True, 'projectId': str(project.id), 'projectName': project.name,
+            'versionLabel': label, 'dataDate': data_date_iso, 'roleAtDeletion': was_role,
+        },
+    )
 
     ordered = list(version_chronology.chronological_versions(project))
     roles = _assign_version_roles(ordered)
@@ -1780,8 +1999,10 @@ def _delete_schedule_version(project, version):
         if role in role_ids:
             role_ids[role] = vid
     return JsonResponse({
-        'deleted': True, 'projectId': str(project.id), 'versionId': str(version.id) if version.id else None,
-        'versionLabel': label, 'deletedRole': was_role,
+        'deleted': True, 'recoverable': True, 'projectId': str(project.id), 'versionId': str(version.id),
+        'versionLabel': label, 'deletedRole': was_role, 'deletedAt': version.deleted_at.isoformat(),
+        'retentionDays': DELETED_VERSION_RETENTION_DAYS,
+        'retentionDeadline': (version.deleted_at + timedelta(days=DELETED_VERSION_RETENTION_DAYS)).isoformat(),
         'remainingVersionCount': len(ordered),
         'projectNowEmpty': len(ordered) == 0,
         'roles': {'currentVersionId': role_ids['CURRENT'], 'previousVersionId': role_ids['PREVIOUS'],
@@ -1790,11 +2011,58 @@ def _delete_schedule_version(project, version):
     })
 
 
+def _restore_schedule_version(project, version, confirmation=None, reason='', user='', request_id=''):
+    """Reverses a soft delete. Never overwrites anything: the row's own
+    data (activities_json, dates, classification) was never touched by
+    deletion, so restoring is purely clearing the is_deleted flag — roles
+    (CURRENT/PREVIOUS/BASELINE) re-resolve fresh from whichever versions
+    are now non-deleted, exactly like after any other version change, so
+    restoration cannot silently collide with or invalidate an existing
+    version's role."""
+    if confirmation != RESTORE_CONFIRMATION_PHRASE:
+        _write_audit_log(
+            user, 'RESTORE_SCHEDULE_VERSION', 'ScheduleUpload', version.id, outcome='REFUSED',
+            reason=reason or 'Missing or incorrect confirmation phrase.', request_id=request_id,
+        )
+        return JsonResponse({'error': f'Restoration requires confirmation="{RESTORE_CONFIRMATION_PHRASE}".'}, status=400)
+    if not version.is_deleted:
+        return JsonResponse({'error': 'This schedule version is not deleted.'}, status=400)
+
+    label = version.version_label or version.original_filename
+    data_date_iso = version.data_date.isoformat() if version.data_date else None
+    was_deleted_at = version.deleted_at.isoformat() if version.deleted_at else None
+
+    version.is_deleted = False
+    version.deleted_at = None
+    version.deleted_by = ''
+    version.delete_reason = ''
+    version.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by', 'delete_reason'])
+
+    _write_audit_log(
+        user, 'RESTORE_SCHEDULE_VERSION', 'ScheduleUpload', version.id, outcome='SUCCESS',
+        reason=reason, request_id=request_id,
+        previous_value={'isDeleted': True, 'deletedAt': was_deleted_at},
+        new_value={'isDeleted': False, 'projectId': str(project.id), 'versionLabel': label, 'dataDate': data_date_iso},
+    )
+
+    ordered = list(version_chronology.chronological_versions(project))
+    roles = _assign_version_roles(ordered)
+    role_ids = {r: None for r in ('CURRENT', 'PREVIOUS', 'BASELINE')}
+    for vid, role in roles.items():
+        if role in role_ids:
+            role_ids[role] = vid
+    return JsonResponse({
+        'restored': True, 'projectId': str(project.id), 'versionId': str(version.id), 'versionLabel': label,
+        'roles': {'currentVersionId': role_ids['CURRENT'], 'previousVersionId': role_ids['PREVIOUS'],
+                  'baselineVersionId': role_ids['BASELINE']},
+    })
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PATCH /api/projects/<id>/versions/<version_id>/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER', DELETE='ADMINISTRATOR')
 @require_http_methods(['PATCH', 'DELETE'])
 def project_version_detail(request, pk, version_id):
     """
@@ -1815,6 +2083,22 @@ def project_version_detail(request, pk, version_id):
                           by _assign_version_roles, never stored directly, so
                           changing this one field is sufficient; no cascading
                           updates to other versions are needed or performed.
+
+    DELETE body (JSON, required — Phase 3/4: Import Protection and Schedule
+    Deletion Auditing):
+      confirmation  required  must equal "DELETE" — see DELETE_CONFIRMATION_PHRASE.
+      reason        optional  free text, written to the audit trail.
+      requestId     optional  caller-supplied correlation id (e.g. to tie a
+                               double-click's two requests together); a
+                               server-generated one is used if omitted.
+    Restricted to the Administrator role (see permissions.py) — the acting
+    user recorded in the audit trail is always request.user.username, the
+    session's own server-verified identity; there is no `user` body field
+    to supply (Phase 3: Authentication and Authorization closed the gap
+    where a caller could claim to be anyone).
+    This is now a SOFT delete — see _delete_schedule_version. The version
+    row is never removed; it becomes recoverable via the restore endpoint
+    until an (not-yet-implemented) retention policy might purge it.
     """
     from .models import Project, ScheduleUpload, SCHEDULE_CLASSIFICATION_CHOICES
 
@@ -1823,12 +2107,25 @@ def project_version_detail(request, pk, version_id):
     except Exception:
         return error_response('Project not found', status=404)
 
-    version = ScheduleUpload.objects.filter(pk=version_id, project=project).first()
+    version = ScheduleUpload.objects.filter(pk=version_id, project=project, is_deleted=False).first()
     if not version:
         return error_response('Schedule version not found for this project', status=404)
 
     if request.method == 'DELETE':
-        return _delete_schedule_version(project, version)
+        try:
+            del_body = json.loads(request.body.decode('utf-8')) if request.body else {}
+        except json.JSONDecodeError:
+            return error_response('Request body must be valid JSON')
+        return _delete_schedule_version(
+            project, version,
+            confirmation=del_body.get('confirmation'), reason=del_body.get('reason') or '',
+            # Phase 3 (Authentication and Authorization): the acting user is
+            # now request.user.username — server-verified by the session,
+            # NEVER a body field a caller could claim to be anyone. The
+            # request body no longer has a `user` field at all (see
+            # project_version_detail's own docstring).
+            user=request.user.username, request_id=del_body.get('requestId') or str(uuid.uuid4()),
+        )
 
     try:
         body = json.loads(request.body.decode('utf-8'))
@@ -1875,11 +2172,106 @@ def project_version_detail(request, pk, version_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /api/projects/<id>/versions/deleted/
+# POST /api/projects/<id>/versions/<version_id>/restore/
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3/4: Import Protection and Schedule Deletion Auditing — the Deleted
+# Versions view's backend. Deliberately separate routes from
+# project_version_detail (which only ever sees non-deleted rows) rather
+# than overloading it, so "show me what's deleted" and "normal version
+# access" can never be confused.
+
+def _serialize_deleted_version(v):
+    return {
+        'id': str(v.id), 'versionLabel': v.version_label or v.original_filename,
+        'originalFilename': v.original_filename, 'dataDate': v.data_date.isoformat() if v.data_date else None,
+        'activityCount': v.activity_count, 'schedule_classification': v.schedule_classification,
+        'deletedAt': v.deleted_at.isoformat() if v.deleted_at else None,
+        'deletedBy': v.deleted_by or None, 'deleteReason': v.delete_reason or None,
+        'retentionDays': DELETED_VERSION_RETENTION_DAYS,
+        'retentionDeadline': (
+            (v.deleted_at + timedelta(days=DELETED_VERSION_RETENTION_DAYS)).isoformat() if v.deleted_at else None
+        ),
+    }
+
+
+@require_role('SCHEDULER')
+@require_http_methods(['GET'])
+def project_deleted_versions(request, pk):
+    """Lists every soft-deleted version of this project, newest-deleted
+    first, plus its own audit history (AuditLog rows for this object id) —
+    the Deleted Versions view's primary data source. Never includes a
+    non-deleted version; the normal /versions/ endpoint already covers
+    those."""
+    from .models import AuditLog, Project, ScheduleUpload
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    deleted = list(ScheduleUpload.objects.filter(project=project, is_deleted=True).order_by('-deleted_at'))
+    out = []
+    for v in deleted:
+        row = _serialize_deleted_version(v)
+        row['auditHistory'] = [
+            {
+                'timestamp': a.timestamp.isoformat(), 'action': a.action, 'outcome': a.outcome,
+                'user': a.user or None, 'reason': a.reason or None, 'requestId': a.request_id or None,
+            }
+            for a in AuditLog.objects.filter(object_type='ScheduleUpload', object_id=str(v.id)).order_by('-timestamp')
+        ]
+        out.append(row)
+
+    return JsonResponse({'projectId': str(project.id), 'deletedVersionCount': len(out), 'deletedVersions': out})
+
+
+@require_role('ADMINISTRATOR')
+@require_http_methods(['POST'])
+def project_version_restore(request, pk, version_id):
+    """
+    Body (JSON):
+      confirmation  required  must equal "RESTORE" — see RESTORE_CONFIRMATION_PHRASE.
+      reason        optional  free text, written to the audit trail.
+      requestId     optional  caller-supplied correlation id.
+
+    Restricted to the Administrator role (see permissions.py) — the acting
+    user recorded in the audit trail is always request.user.username, the
+    session's own server-verified identity; there is no `user` body field.
+
+    Only ever operates on a version that IS currently soft-deleted —
+    see _restore_schedule_version for why this can never silently collide
+    with or invalidate an existing version's CURRENT/PREVIOUS/BASELINE role.
+    """
+    from .models import Project, ScheduleUpload
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    version = ScheduleUpload.objects.filter(pk=version_id, project=project, is_deleted=True).first()
+    if not version:
+        return error_response('Deleted schedule version not found for this project', status=404)
+
+    try:
+        body = json.loads(request.body.decode('utf-8')) if request.body else {}
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    return _restore_schedule_version(
+        project, version,
+        confirmation=body.get('confirmation'), reason=body.get('reason') or '',
+        user=request.user.username, request_id=body.get('requestId') or str(uuid.uuid4()),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GET  /api/projects/<id>/documents/
 # POST /api/projects/<id>/documents/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_documents(request, pk):
     """
@@ -1948,7 +2340,7 @@ def project_documents(request, pk):
     schedule_upload = None
     if schedule_upload_id:
         from .models import ScheduleUpload
-        schedule_upload = ScheduleUpload.objects.filter(pk=schedule_upload_id, project=project).first()
+        schedule_upload = ScheduleUpload.objects.filter(pk=schedule_upload_id, project=project, is_deleted=False).first()
 
     doc = ScheduleDocument.objects.create(
         project=project,
@@ -1977,7 +2369,7 @@ def project_documents(request, pk):
 # POST /api/projects/<id>/compare/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_POST
 def project_compare(request, pk):
     """
@@ -2010,8 +2402,8 @@ def project_compare(request, pk):
     if not previous_id or not current_id:
         return error_response('previousVersionId and currentVersionId are required')
 
-    previous_version = ScheduleUpload.objects.filter(pk=previous_id, project=project).first()
-    current_version = ScheduleUpload.objects.filter(pk=current_id, project=project).first()
+    previous_version = ScheduleUpload.objects.filter(pk=previous_id, project=project, is_deleted=False).first()
+    current_version = ScheduleUpload.objects.filter(pk=current_id, project=project, is_deleted=False).first()
     if not previous_version or not current_version:
         return error_response(
             'Both versions must belong to this project. One or both version IDs were not found here.',
@@ -2106,7 +2498,7 @@ def project_compare(request, pk):
 # GET /api/projects/<id>/progress-curve/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_progress_curve(request, pk):
     """
@@ -2128,21 +2520,21 @@ def project_progress_curve(request, pk):
     if not current_id:
         return error_response('currentVersionId is required')
 
-    current_version = ScheduleUpload.objects.filter(pk=current_id, project=project).first()
+    current_version = ScheduleUpload.objects.filter(pk=current_id, project=project, is_deleted=False).first()
     if not current_version:
         return error_response('currentVersionId was not found on this project', status=404)
 
     baseline_version = None
     baseline_id = request.GET.get('baselineVersionId')
     if baseline_id:
-        baseline_version = ScheduleUpload.objects.filter(pk=baseline_id, project=project).first()
+        baseline_version = ScheduleUpload.objects.filter(pk=baseline_id, project=project, is_deleted=False).first()
         if not baseline_version:
             return error_response('baselineVersionId was not found on this project', status=404)
 
     previous_version = None
     previous_id = request.GET.get('previousVersionId')
     if previous_id:
-        previous_version = ScheduleUpload.objects.filter(pk=previous_id, project=project).first()
+        previous_version = ScheduleUpload.objects.filter(pk=previous_id, project=project, is_deleted=False).first()
         if not previous_version:
             return error_response('previousVersionId was not found on this project', status=404)
 
@@ -2186,7 +2578,10 @@ def _resolve_latest_version(project, version_id):
     that edge case."""
     from .models import ScheduleUpload
     if version_id:
-        return ScheduleUpload.objects.filter(pk=version_id, project=project).first()
+        # is_deleted=False so an explicit ?currentVersion=<id> can never
+        # resolve a soft-deleted version back into "current" for any
+        # endpoint — see chronological_versions()'s own exclusion.
+        return ScheduleUpload.objects.filter(pk=version_id, project=project, is_deleted=False).first()
     ordered = list(version_chronology.chronological_versions(project))
     if not ordered:
         return None
@@ -2199,7 +2594,7 @@ def _resolve_latest_version(project, version_id):
 # GET /api/projects/<id>/risk/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_risk(request, pk):
     """
@@ -2232,7 +2627,7 @@ def project_risk(request, pk):
     comparison_result = None
     compare_version_id = request.GET.get('compareVersion')
     if compare_version_id:
-        compare_version = ScheduleUpload.objects.filter(pk=compare_version_id, project=project).first()
+        compare_version = ScheduleUpload.objects.filter(pk=compare_version_id, project=project, is_deleted=False).first()
         if compare_version:
             calendars = _calendars_for(compare_version, version)
             comparison_result = compare_schedules(compare_version.activities_json, activities, calendars)
@@ -2264,7 +2659,7 @@ def project_risk(request, pk):
 # GET /api/projects/<id>/milestones/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_milestones(request, pk):
     """
@@ -2289,14 +2684,14 @@ def project_milestones(request, pk):
     baseline_activities = None
     baseline_id = request.GET.get('baselineVersion')
     if baseline_id:
-        bv = ScheduleUpload.objects.filter(pk=baseline_id, project=project).first()
+        bv = ScheduleUpload.objects.filter(pk=baseline_id, project=project, is_deleted=False).first()
         if bv:
             baseline_activities = bv.activities_json
 
     comparison_result = None
     compare_id = request.GET.get('compareVersion')
     if compare_id:
-        cv = ScheduleUpload.objects.filter(pk=compare_id, project=project).first()
+        cv = ScheduleUpload.objects.filter(pk=compare_id, project=project, is_deleted=False).first()
         if cv:
             calendars = _calendars_for(cv, version)
             comparison_result = compare_schedules(cv.activities_json, version.activities_json, calendars)
@@ -2351,7 +2746,7 @@ def _resolve_baseline_and_current(project, request):
     baseline = None
     baseline_id = request.GET.get('baselineVersion')
     if baseline_id:
-        baseline = ScheduleUpload.objects.filter(pk=baseline_id, project=project).first()
+        baseline = ScheduleUpload.objects.filter(pk=baseline_id, project=project, is_deleted=False).first()
     else:
         ordered = list(version_chronology.chronological_versions(project))
         roles = _assign_version_roles(ordered)
@@ -2404,7 +2799,7 @@ def _resolve_previous_and_current(project, request):
     previous = None
     previous_id = request.GET.get('previousVersion')
     if previous_id:
-        previous = ScheduleUpload.objects.filter(pk=previous_id, project=project).first()
+        previous = ScheduleUpload.objects.filter(pk=previous_id, project=project, is_deleted=False).first()
     elif current:
         # Chronology by effective Data Date; an unresolved same-Data-Date
         # conflict just before CURRENT yields previous=None + an explanation
@@ -2415,7 +2810,7 @@ def _resolve_previous_and_current(project, request):
     baseline = None
     baseline_id = request.GET.get('baselineVersion')
     if baseline_id:
-        baseline = ScheduleUpload.objects.filter(pk=baseline_id, project=project).first()
+        baseline = ScheduleUpload.objects.filter(pk=baseline_id, project=project, is_deleted=False).first()
     else:
         roles = _assign_version_roles(ordered)
         baseline = next((v for v in ordered if roles.get(str(v.id)) == 'BASELINE'), None)
@@ -2423,11 +2818,71 @@ def _resolve_previous_and_current(project, request):
     return current, previous, baseline
 
 
+def _baseline_designation_info(project, baseline):
+    """Baseline Detection and Intelligence Enhancement — additive metadata
+    alongside the baseline-vs-current resolution above. Never read by
+    baseline_progress.build_baseline_progress or any calculation it feeds
+    (EVM, S-curves, dashboard KPIs) — purely descriptive, so the UI can
+    show it without ever conflating "an additional project record exists
+    inside a file" with "ScheduleIQ treats this as the project's baseline"
+    (see xer_baseline_detection.py's module docstring — those records are
+    POTENTIAL baseline references, never asserted as confirmed). `source`
+    is always SCHEDULEIQ_CLASSIFICATION: the designated baseline is, and
+    only ever has been, a human's schedule_classification choice on an
+    imported version — never derived from in-file project records."""
+    from .models import ScheduleUpload
+
+    baseline_versions = ScheduleUpload.objects.filter(
+        project=project, is_deleted=False,
+        schedule_classification__in=('APPROVED_BASELINE', 'REVISED_BASELINE'),
+    )
+    imported_count = baseline_versions.count()
+    # approval_status exists on every ScheduleUpload (PENDING/APPROVED/
+    # REJECTED/SUPERSEDED) but no workflow in this codebase sets it yet —
+    # this will accurately read 0 until one does; it is NOT a sign of a
+    # bug, and this phase does not add that workflow (see the Phase 2
+    # report's explicit scope boundary).
+    approved_count = baseline_versions.filter(approval_status='APPROVED').count()
+
+    designated = None
+    if baseline is not None:
+        designated = {
+            'versionId': str(baseline.id),
+            'versionLabel': baseline.version_label or baseline.original_filename,
+            'dataDate': baseline.data_date.isoformat() if baseline.data_date else None,
+            'classification': baseline.schedule_classification,
+            'source': 'SCHEDULEIQ_CLASSIFICATION',
+        }
+
+    # Whether the resolved baseline VERSION's own source XER file carried
+    # additional PROJECT-table rows (see xer_baseline_detection.py) — None/
+    # unavailable for any non-XER import or any version imported before
+    # this field existed, never defaulted to 0 (that would falsely claim
+    # "checked, found none"). These are ADDITIONAL project records —
+    # potential baseline references, never confirmed ones.
+    if baseline is not None and baseline.xer_project_record_count is not None:
+        xer_info = {
+            'available': True,
+            'projectRecordCount': baseline.xer_project_record_count,
+            'additionalProjectRecordCount': baseline.xer_additional_project_record_count,
+            'additionalProjectRecords': baseline.xer_additional_project_records or [],
+        }
+    else:
+        xer_info = {'available': False, 'projectRecordCount': None, 'additionalProjectRecordCount': None, 'additionalProjectRecords': []}
+
+    return {
+        'designatedBaseline': designated,
+        'importedBaselineVersionCount': imported_count,
+        'approvedBaselineVersionCount': approved_count,
+        'selectedVersionXerInfo': xer_info,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GET /api/projects/<id>/baseline-progress/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_baseline_progress(request, pk):
     """
@@ -2477,6 +2932,7 @@ def project_baseline_progress(request, pk):
         'baselineVersionId': str(baseline.id) if baseline else None,
         'baselineVersionLabel': baseline.version_label if baseline else None,
         'baselineMessage': None if baseline else 'No baseline schedule has been selected for this project.',
+        'baselineInfo': _baseline_designation_info(project, baseline),
         **result,
     })
 
@@ -2485,7 +2941,7 @@ def project_baseline_progress(request, pk):
 # GET /api/projects/<id>/lookahead/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_lookahead(request, pk):
     """
@@ -2549,7 +3005,7 @@ def project_lookahead(request, pk):
 # GET /api/projects/<id>/baseline-progress/export/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_baseline_progress_export(request, pk):
     """
@@ -2625,7 +3081,7 @@ def project_baseline_progress_export(request, pk):
 # GET /api/projects/<id>/update-intelligence/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_update_intelligence(request, pk):
     """
@@ -2711,7 +3167,7 @@ def _validate_ev_pv_methods(request):
 # GET /api/projects/<id>/cost-summary/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_cost_summary(request, pk):
     """
@@ -2830,7 +3286,7 @@ def _compute_budget_breakdown(project, summary):
 # GET /api/projects/<id>/earned-value/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_earned_value(request, pk):
     """
@@ -2904,7 +3360,7 @@ def project_earned_value(request, pk):
 # GET /api/projects/<id>/productivity/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_productivity(request, pk):
     """
@@ -2952,7 +3408,7 @@ def project_productivity(request, pk):
 # GET /api/projects/<id>/cost-history/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_cost_history(request, pk):
     """
@@ -3027,7 +3483,7 @@ _latest_approved_eac = report_service.latest_approved_eac
 # GET /api/projects/<id>/controls-trends/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_controls_trends(request, pk):
     """
@@ -3089,7 +3545,7 @@ def project_controls_trends(request, pk):
 # GET /api/projects/<id>/controls-drivers/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_controls_drivers(request, pk):
     """
@@ -3133,7 +3589,7 @@ def project_controls_drivers(request, pk):
             if not compare_id:
                 return error_response('dimension=forecast requires a compareVersion query param')
             from .models import ScheduleUpload
-            compare_version = ScheduleUpload.objects.filter(pk=compare_id, project=project).first()
+            compare_version = ScheduleUpload.objects.filter(pk=compare_id, project=project, is_deleted=False).first()
             if not compare_version:
                 return error_response('compareVersion not found for this project', status=404)
             forecast_method = request.GET.get('forecastMethod', 'CPI_BASED')
@@ -3160,7 +3616,7 @@ def project_controls_drivers(request, pk):
 # GET /api/projects/<id>/executive-summary/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_executive_summary(request, pk):
     """
@@ -3217,7 +3673,7 @@ def _serialize_report_summary(r):
     }
 
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_reports(request, pk):
     """
@@ -3266,16 +3722,16 @@ def project_reports(request, pk):
     version_id = body.get('version')
     version = None
     if version_id:
-        version = ScheduleUpload.objects.filter(pk=version_id, project=project).first()
+        version = ScheduleUpload.objects.filter(pk=version_id, project=project, is_deleted=False).first()
         if not version:
             return error_response('version does not belong to this project', status=404)
 
     baseline_version_id = body.get('baselineVersion')
-    if baseline_version_id and not ScheduleUpload.objects.filter(pk=baseline_version_id, project=project).exists():
+    if baseline_version_id and not ScheduleUpload.objects.filter(pk=baseline_version_id, project=project, is_deleted=False).exists():
         return error_response('baselineVersion does not belong to this project', status=404)
 
     update_previous_version_id = body.get('updatePreviousVersion')
-    if update_previous_version_id and not ScheduleUpload.objects.filter(pk=update_previous_version_id, project=project).exists():
+    if update_previous_version_id and not ScheduleUpload.objects.filter(pk=update_previous_version_id, project=project, is_deleted=False).exists():
         return error_response('updatePreviousVersion does not belong to this project', status=404)
 
     lookahead_weeks = body.get('lookaheadWeeks')
@@ -3311,7 +3767,7 @@ def project_reports(request, pk):
     payload.pop('_allDrivers', None)
     trace = payload.get('traceability') or {}
     if version is None and trace.get('scheduleVersionId'):
-        version = ScheduleUpload.objects.filter(pk=trace['scheduleVersionId']).first()
+        version = ScheduleUpload.objects.filter(pk=trace['scheduleVersionId'], is_deleted=False).first()
 
     record = ProjectControlsReport.objects.create(
         project=project, schedule_upload=version,
@@ -3323,7 +3779,7 @@ def project_reports(request, pk):
     return JsonResponse({**_serialize_report_summary(record), 'payload': payload}, status=201)
 
 
-@csrf_exempt
+@require_role('VIEWER', DELETE='SCHEDULER')
 @require_http_methods(['GET', 'DELETE'])
 def project_report_detail(request, pk, report_id):
     from .models import Project, ProjectControlsReport
@@ -3344,7 +3800,7 @@ def project_report_detail(request, pk, report_id):
     return JsonResponse({**_serialize_report_summary(record), 'payload': record.payload_json})
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_report_pdf(request, pk, report_id):
     """Streams a PDF built ONLY from the persisted report snapshot — see
@@ -3372,7 +3828,7 @@ def project_report_pdf(request, pk, report_id):
     return response
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_report_excel(request, pk, report_id):
     """Streams an .xlsx workbook built ONLY from the persisted report
@@ -3400,7 +3856,7 @@ def project_report_excel(request, pk, report_id):
     return response
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_reports_compare(request, pk):
     """
@@ -3511,7 +3967,7 @@ def _validate_cost_entry_body(body, partial=False):
     return cleaned, None
 
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_cost_entries(request, pk):
     """
@@ -3556,7 +4012,7 @@ def project_cost_entries(request, pk):
     schedule_upload = None
     version_id = body.get('scheduleVersionId')
     if version_id:
-        schedule_upload = ScheduleUpload.objects.filter(pk=version_id, project=project).first()
+        schedule_upload = ScheduleUpload.objects.filter(pk=version_id, project=project, is_deleted=False).first()
         if not schedule_upload:
             return error_response('scheduleVersionId does not belong to this project', status=404)
 
@@ -3573,7 +4029,7 @@ def project_cost_entries(request, pk):
     return JsonResponse(_serialize_cost_entry(entry), status=201)
 
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_http_methods(['PATCH', 'DELETE'])
 def project_cost_entry_detail(request, pk, entry_id):
     from .models import Project, ManualCostEntry
@@ -3667,7 +4123,7 @@ def _recent_documents(project, limit=5):
 # GET/POST /api/projects/<id>/ai-review/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_ai_review(request, pk):
     """
@@ -3703,12 +4159,12 @@ def project_ai_review(request, pk):
     previous_version = None
     compare_id = params.get('compareVersion')
     if compare_id:
-        previous_version = ScheduleUpload.objects.filter(pk=compare_id, project=project).first()
+        previous_version = ScheduleUpload.objects.filter(pk=compare_id, project=project, is_deleted=False).first()
 
     baseline_version = None
     baseline_id = params.get('baselineVersion')
     if baseline_id:
-        baseline_version = ScheduleUpload.objects.filter(pk=baseline_id, project=project).first()
+        baseline_version = ScheduleUpload.objects.filter(pk=baseline_id, project=project, is_deleted=False).first()
 
     focus_area = params.get('focusArea')
     focus = {'area': focus_area} if focus_area else None
@@ -3758,7 +4214,7 @@ def project_ai_review(request, pk):
 # POST /api/projects/<id>/ai-chat/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_POST
 def project_ai_chat(request, pk):
     """
@@ -3794,7 +4250,7 @@ def project_ai_chat(request, pk):
     previous_unresolved = None
     compare_id = body.get('compareVersion')
     if compare_id:
-        previous_version = ScheduleUpload.objects.filter(pk=compare_id, project=project).first()
+        previous_version = ScheduleUpload.objects.filter(pk=compare_id, project=project, is_deleted=False).first()
     elif body.get('autoCompare', True):
         previous_version, previous_unresolved = version_chronology.previous_resolution(
             version_chronology.chronological_versions(project), version)
@@ -3912,7 +4368,7 @@ def _run_scenario_for_version(project, version, assumptions):
     )
 
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_recovery_scenarios(request, pk):
     """
@@ -3938,7 +4394,7 @@ def project_recovery_scenarios(request, pk):
         return error_response('Request body must be valid JSON')
 
     schedule_upload_id = body.get('scheduleUploadId')
-    version = ScheduleUpload.objects.filter(pk=schedule_upload_id, project=project).first()
+    version = ScheduleUpload.objects.filter(pk=schedule_upload_id, project=project, is_deleted=False).first()
     if not version:
         return error_response('scheduleUploadId was not found on this project', status=404)
 
@@ -3979,7 +4435,7 @@ def project_recovery_scenarios(request, pk):
 # GET/PUT/PATCH/DELETE /api/projects/<id>/recovery-scenarios/<scenario_id>/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER', PUT='SCHEDULER', PATCH='SCHEDULER', DELETE='SCHEDULER')
 @require_http_methods(['GET', 'PUT', 'PATCH', 'DELETE'])
 def project_recovery_scenario_detail(request, pk, scenario_id):
     from .models import Project, RecoveryScenario
@@ -4110,7 +4566,7 @@ def _serialize_schedule_risk_workflow(sr):
     }
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_risk_register(request, pk):
     """
@@ -4191,7 +4647,7 @@ def project_risk_register(request, pk):
 # PATCH /api/projects/<id>/risk-register/<risk_key>/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('SCHEDULER')
 @require_http_methods(['PATCH'])
 def project_risk_detail(request, pk, risk_key):
     """
@@ -4242,7 +4698,7 @@ def project_risk_detail(request, pk, risk_key):
 # GET /api/projects/<id>/risk-register/<risk_key>/driving-chain/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_risk_driving_chain(request, pk, risk_key):
     """Query params: version (defaults to CURRENT), maxHops."""
@@ -4291,7 +4747,7 @@ def _serialize_mitigation_action(a):
     }
 
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_mitigation_actions(request, pk):
     from .models import MitigationAction, Project, RecoveryScenario, ScheduleRisk
@@ -4338,7 +4794,7 @@ def project_mitigation_actions(request, pk):
     return JsonResponse(_serialize_mitigation_action(action), status=201)
 
 
-@csrf_exempt
+@require_role('VIEWER', PATCH='SCHEDULER', DELETE='SCHEDULER')
 @require_http_methods(['GET', 'PATCH', 'DELETE'])
 def project_mitigation_action_detail(request, pk, action_id):
     from .models import MitigationAction, Project
@@ -4429,7 +4885,7 @@ def _serialize_milestone_revision(r):
     }
 
 
-@csrf_exempt
+@require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_contractual_milestones(request, pk):
     from .models import MILESTONE_CATEGORY_CHOICES, MilestoneDefinition, Project
@@ -4488,7 +4944,7 @@ def project_contractual_milestones(request, pk):
     return JsonResponse(_serialize_contractual_milestone(entry), status=201)
 
 
-@csrf_exempt
+@require_role('VIEWER', PATCH='SCHEDULER', DELETE='SCHEDULER')
 @require_http_methods(['GET', 'PATCH', 'DELETE'])
 def project_contractual_milestone_detail(request, pk, milestone_id):
     from .models import MILESTONE_CATEGORY_CHOICES, ContractualMilestoneRevision, MilestoneDefinition, Project
@@ -4569,7 +5025,7 @@ def project_contractual_milestone_detail(request, pk, milestone_id):
     return JsonResponse(_serialize_contractual_milestone(entry))
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_contractual_milestone_revisions(request, pk, milestone_id):
     from .models import MilestoneDefinition, Project
@@ -4593,7 +5049,7 @@ def project_contractual_milestone_revisions(request, pk, milestone_id):
 # GET /api/projects/<id>/field-dashboard-summary/
 # ─────────────────────────────────────────────────────────────────────────────
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_field_dashboard_summary(request, pk):
     """
@@ -4917,7 +5373,7 @@ def _rows_with_completed_float_included(rows):
     return out
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_activity_analysis(request, pk):
     """Master Activity Analysis — one authoritative analytical row per
@@ -4984,7 +5440,7 @@ def project_activity_analysis(request, pk):
     })
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_float_analysis(request, pk):
     """Float Intelligence workspace — summary, distribution histogram,
@@ -5143,7 +5599,7 @@ def _dashboard_intelligence_bullets(ui_result, register):
     return bullets
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_dashboard_summary(request, pk):
     """
@@ -5374,7 +5830,7 @@ def project_dashboard_summary(request, pk):
     return JsonResponse(result)
 
 
-@csrf_exempt
+@require_role('VIEWER')
 @require_http_methods(['GET'])
 def project_float_trend(request, pk):
     """Float Trend Across Versions — Imported P6 Total Float for one

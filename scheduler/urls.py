@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .auth_views import csrf_bootstrap, login_view, logout_view, me_view, user_detail, users_list
 from .views import (
     analyze,
     import_commit,
@@ -48,6 +49,8 @@ from .views import (
     project_contractual_milestone_revisions,
     project_field_dashboard_summary,
     project_version_detail,
+    project_version_restore,
+    project_deleted_versions,
     project_versions,
     projects,
     projects_reconcile,
@@ -62,6 +65,12 @@ from .views import (
 )
 
 urlpatterns = [
+    path('auth/csrf/', csrf_bootstrap, name='auth_csrf'),
+    path('auth/login/', login_view, name='auth_login'),
+    path('auth/logout/', logout_view, name='auth_logout'),
+    path('auth/me/', me_view, name='auth_me'),
+    path('auth/users/', users_list, name='auth_users'),
+    path('auth/users/<int:user_id>/', user_detail, name='auth_user_detail'),
     path('upload/', upload, name='upload'),
     path('metrics/', metrics, name='metrics'),
     path('analyze/', analyze, name='analyze'),
@@ -83,7 +92,11 @@ urlpatterns = [
     path('projects/<str:pk>/float-analysis/', project_float_analysis, name='project_float_analysis'),
     path('projects/<str:pk>/float-trend/', project_float_trend, name='project_float_trend'),
     path('projects/<str:pk>/dashboard-summary/', project_dashboard_summary, name='project_dashboard_summary'),
+    # Must be registered BEFORE versions/<str:version_id>/ below, or that
+    # pattern would greedily treat "deleted" as a version_id.
+    path('projects/<str:pk>/versions/deleted/', project_deleted_versions, name='project_deleted_versions'),
     path('projects/<str:pk>/versions/<str:version_id>/', project_version_detail, name='project_version_detail'),
+    path('projects/<str:pk>/versions/<str:version_id>/restore/', project_version_restore, name='project_version_restore'),
     path('projects/<str:pk>/documents/', project_documents, name='project_documents'),
     path('projects/<str:pk>/compare/', project_compare, name='project_compare'),
     path('projects/<str:pk>/progress-curve/', project_progress_curve, name='project_progress_curve'),

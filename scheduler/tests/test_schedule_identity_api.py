@@ -41,7 +41,14 @@ def _codes(prefix, n, start=0):
 class ScheduleIdentityApiWiringTests(TestCase):
     def _commit(self, task_codes, project_id=None, **kwargs):
         upload = SimpleUploadedFile('x.xer', _xer(task_codes, **kwargs))
-        data = {'file': upload}
+        # Phase 2 (Import Protection) enforces the identity evaluator at
+        # commit, not just in preview — several of these fixtures deliberately
+        # commit a second version whose activity codes don't overlap the
+        # first (e.g. to test reference-version resolution, not identity
+        # itself), which the evaluator correctly flags for confirmation. This
+        # helper confirms unconditionally; it is a no-op when nothing was
+        # actually flagged.
+        data = {'file': upload, 'confirmIdentityMismatch': 'true'}
         if project_id:
             data['projectId'] = project_id
         else:

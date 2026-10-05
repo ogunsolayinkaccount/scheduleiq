@@ -1,6 +1,9 @@
 import { useState, useCallback, useMemo, useRef, useEffect, Fragment, createContext, useContext } from "react";
 import { idbSave, idbLoadAll, idbDelete } from "./idb";
 import { notifyProjectsChanged } from "./projectEvents";
+import { deleteConfirmationBody } from "./importProtection";
+import { useAuth } from "./AuthContext";
+import Login from "./Login";
 import IntelligenceSync from "./IntelligenceSync";
 import ImportCenter from "./ImportCenter";
 import UpdateAnalysis from "./UpdateAnalysis";
@@ -14,6 +17,7 @@ import Intelligence from "./Intelligence";
 import Dashboard from "./Dashboard";
 import FieldDashboard from "./FieldDashboard";
 import Reports from "./Reports";
+import DeletedVersions from "./DeletedVersions";
 import { applyLogicEdits, computeCPM, wouldCreateCycle, linkKey, type RelType, type LogicEdit, type LogicEditMap } from "./cpm";
 import { pickDrivingRel, tracePath } from "./pathTrace";
 import { legacyFilterToActivityAnalysis, activityJumpFilter } from "./activityNavigation";
@@ -454,11 +458,9 @@ function ProjectSelector({files,selectedIds,onChange,onDelete}:any){
                     <button
                       type="button"
                       title="Delete project"
-                      onClick={e=>{e.stopPropagation();const msg=f.scheduleUploadId?`Delete "${f.name}"?
+                      onClick={e=>{e.stopPropagation();const msg=f.scheduleUploadId?`Delete "${f.name}"${f.dataDate?` (Data Date: ${f.dataDate})`:""}?
 
-This removes this schedule version from ScheduleIQ, including the Intelligence Portal, together with its dependent analysis data. Other versions of the same project are kept.
-
-This cannot be undone.`:`Delete "${f.name}"? This cannot be undone.`;if(window.confirm(msg))onDelete(f.id);}}
+This removes this schedule version from ScheduleIQ, including the Intelligence Portal, and from normal selection everywhere. Other versions of the same project are kept. It becomes recoverable from Deleted Versions until an authorized restore or the retention period.`:`Delete "${f.name}"? This cannot be undone.`;if(window.confirm(msg))onDelete(f.id);}}
                       style={{background:'transparent',border:'none',color:C.muted,cursor:'pointer',
                         fontSize:14,padding:'2px 4px',lineHeight:1,flexShrink:0,
                         borderRadius:4,transition:'color 0.15s'}}
@@ -1014,6 +1016,7 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
     {id:"baselineProgress", label:"Baseline & Progress", icon:"📐", highlight:true},
     {id:"intelligence", label:"Intelligence",    icon:"🧠", highlight:true},
     {id:"reports",      label:"Reports",          icon:"🖨️", highlight:true},
+    {id:"deletedVersions", label:"Deleted Versions", icon:"🗑️", highlight:true},
   ];
   return(
     <div style={{background:C.panel,borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,zIndex:100}}>
@@ -1055,6 +1058,7 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
         <input ref={addRef} type="file" accept=".xer,.xlsx,.xls,.csv,.xml,.pdf,.mpp" multiple onChange={e=>{const fl=Array.from(e.target.files||[]);if(fl.length)onSelectFiles(fl);(e.target as HTMLInputElement).value="";}} style={{display:"none"}}/>
         <button onClick={()=>addRef.current?.click()} style={{background:"rgba(0,200,240,0.08)",border:`1px solid ${C.accent}`,color:C.accent,borderRadius:8,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:600,whiteSpace:"nowrap"}}>+ Add Files</button>
         <button onClick={onReset} style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap",marginLeft:"auto"}}>↩ New Session</button>
+        <UserBadge/>
       </div>
       <div style={{display:"flex",padding:"0 14px",gap:0,flexWrap:"wrap"}}>
         {nav.map((v:any)=>(
@@ -1063,6 +1067,21 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+const ROLE_BADGE_COLOR:Record<string,string>={ADMINISTRATOR:C.red,SCHEDULER:C.accent,VIEWER:C.muted2};
+function UserBadge(){
+  const {user,logout}=useAuth();
+  if(!user)return null;
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:10,flexShrink:0}}>
+      <div style={{textAlign:"right"}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.text,lineHeight:1.2}}>{user.username}</div>
+        <div style={{fontSize:9,fontWeight:800,color:ROLE_BADGE_COLOR[user.role]||C.muted2,textTransform:"uppercase",letterSpacing:"0.04em"}}>{user.role}</div>
+      </div>
+      <button onClick={()=>logout()} title="Log out" style={{background:"transparent",border:`1px solid ${C.border}`,color:C.muted2,borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:11,fontFamily:"inherit",whiteSpace:"nowrap"}}>Log Out</button>
     </div>
   );
 }
@@ -5844,7 +5863,22 @@ function LegacyMovedNotice({title, body, destinationLabel, destinationView, setV
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
+// Phase 3 (Authentication and Authorization) — gates the whole app behind
+// a real session. AppShell (below) is the entire pre-existing application;
+// this wrapper never touches its internals, it just decides whether to
+// render <Login/>, a brief loading state, or AppShell.
 export default function App(){
+  const {user,loading}=useAuth();
+  if(loading){
+    return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,color:C.muted,fontSize:13}}>Loading…</div>;
+  }
+  if(!user){
+    return <Login/>;
+  }
+  return <AppShell/>;
+}
+
+function AppShell(){
   const [files,setFiles]=useState<any[]>([]);
   const [selectedIds,setSelectedIds]=useState<any[]>([]);
   const [view,setView]=useState("portfolio");
@@ -6166,7 +6200,12 @@ export default function App(){
       });
     };
     if(!(f?.projectId&&f?.scheduleUploadId)){removeLocal();return;}
-    fetch(`/api/projects/${f.projectId}/versions/${f.scheduleUploadId}/`,{method:"DELETE"})
+    // Soft delete (Phase 3/4) requires an explicit confirmation phrase in the
+    // body — the window.confirm dialog above is what makes this click
+    // deliberate, but the backend never trusts that alone.
+    fetch(`/api/projects/${f.projectId}/versions/${f.scheduleUploadId}/`,{
+      method:"DELETE",headers:{"Content-Type":"application/json"},body:deleteConfirmationBody(),
+    })
       .then(async r=>{
         if(r.status===404)return {projectNowEmpty:false};   // already gone server-side — just clear the local copy
         if(!r.ok)throw new Error(await r.text());
@@ -6437,6 +6476,7 @@ export default function App(){
             body="Project Controls' Reports tab uses the authoritative report_service.py pipeline — Float Intelligence, Progress & Milestones, Update Intelligence and Schedule Risk & Recovery sections, persisted snapshots, and real PDF/Excel export — instead of a quick popup summary."
             destinationLabel="Project Controls" destinationView="projectControls" setView={setView}
             goTo={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);}}}/>}
+          {view==="deletedVersions"                    &&<DeletedVersions initialProjectId={preferredProjectId}/>}
         </div>
       </div>
     </div>

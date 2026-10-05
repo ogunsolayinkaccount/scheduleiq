@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { parseErrorMessage, buildImportConfirmationFields } from "./importProtection";
 
 // ─── THEME (mirrors App.tsx's palette so this reads as the same product) ─────
 const C = {
@@ -220,6 +221,13 @@ function ScheduleIdentityPanel({ identity, onSwitchToNewProject }: { identity: S
         <div>WBS structure: <strong>{overlapText(s.wbsOverlap)}</strong> overlap</div>
         <div>Milestones: <strong>{overlapText(s.milestoneOverlap)}</strong> matched</div>
       </div>
+
+      {identity.versionLineageCompatibility === "SCOPE_DIVERGENT" && (
+        <WarningBanner color={C.amber} title="Potentially incompatible schedule scope">
+          The activity population size differs substantially ({identity.scopeDivergence.referenceCount.toLocaleString()} vs {identity.scopeDivergence.uploadedCount.toLocaleString()} activities) even though this upload matches the selected project's identity.
+          This can mean a scoped subset/superset of the same underlying project (e.g. a discipline-filtered export) rather than the next chronological update — review before importing.
+        </WarningBanner>
+      )}
 
       {identity.classification === "LIKELY_DIFFERENT_PROJECT" && (
         <div style={{ marginBottom: 10 }}>
@@ -738,11 +746,7 @@ export default function ImportCenter({
     fetch(`${API}/api/import/preview/`, { method: "POST", body: fd })
       .then(async (r) => {
         const text = await r.text();
-        if (!r.ok) {
-          let msg = text;
-          try { msg = JSON.parse(text).error || text; } catch {}
-          throw new Error(msg);
-        }
+        if (!r.ok) throw new Error(parseErrorMessage(text));
         return JSON.parse(text) as Preview;
       })
       .then((preview) => {
@@ -816,14 +820,22 @@ export default function ImportCenter({
       if (mode === "existing" && selectedProjectId) fd.append("projectId", selectedProjectId);
       if (entry.classification) fd.append("classification", entry.classification);
       if (entry.versionLabel) fd.append("versionLabel", entry.versionLabel);
+      // Carry the explicit acknowledgements already captured above through to
+      // the commit itself. The backend enforces every one of these
+      // server-side (Phase 2: Import Protection) regardless of what preview
+      // showed — a direct API call can't bypass it, and neither can this UI
+      // skipping the flag: omitting any of these when the matching warning
+      // was shown would make the commit a guaranteed 409.
+      for (const [field, value] of Object.entries(buildImportConfirmationFields(entry))) fd.append(field, value);
       try {
         const r = await fetch(`${API}/api/import/commit/`, { method: "POST", body: fd });
         const text = await r.text();
-        if (!r.ok) {
-          let msg = text;
-          try { msg = JSON.parse(text).error || text; } catch {}
-          throw new Error(msg);
-        }
+        // The Phase 2 protection responses (EXACT_DUPLICATE_IMPORT,
+        // MATCHING_PROJECT_FOUND, SCHEDULE_IDENTITY_UNCERTAIN) carry both a
+        // machine-readable `error` code and a human-readable `message` —
+        // parseErrorMessage prefers the message so this banner never shows
+        // a raw code.
+        if (!r.ok) throw new Error(parseErrorMessage(text));
         const data = JSON.parse(text);
         if (data.error) throw new Error(data.error);
         results.push({

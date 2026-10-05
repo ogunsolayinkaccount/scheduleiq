@@ -5,6 +5,7 @@ import {
   CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { formatDataDate, sourceDataDateTooltip, versionSelectLabel, dedupeVersionsById } from "./dateFormat";
+import { deleteConfirmationBody } from "./importProtection";
 
 const C = {
   bg: "#f5f2ec", panel: "#ede9df", card: "#ffffff", card2: "#f0ece4",
@@ -170,7 +171,7 @@ function ScheduleVersionsTab({ versions, roleChangeError, roleChangeSavingId, on
                       armedDeleteId === v.id ? (
                         <span style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", maxWidth: 380 }}>
                           <span style={{ fontSize: 11, color: C.red }}>
-                            Delete only this schedule version and its dependent analysis (other versions are kept)?
+                            Delete <strong>{v.versionLabel}</strong> (Data Date: {v.dataDate || "—"})? It becomes recoverable from Deleted Versions — other versions are kept.
                             {v.role === "BASELINE" && " It is the Approved Baseline — no baseline will exist until you designate another."}
                           </span>
                           <button disabled={deletingVersionId === v.id} onClick={() => { onDeleteVersion(v.id); setArmedDeleteId(null); }}
@@ -356,7 +357,14 @@ export default function ProjectControls({ initialProjectId, initialSubTab }: { i
   const deleteVersion = (targetVersionId: string) => {
     if (!projectId) return;
     setDeletingVersionId(targetVersionId); setDeleteError(null);
-    sfetch(`${API}/api/projects/${projectId}/versions/${targetVersionId}/`, { method: "DELETE" })
+    // Soft delete (Phase 3/4: Import Protection and Schedule Deletion
+    // Auditing) requires an explicit confirmation phrase in the body — the
+    // inline arm/confirm UI above is what makes this click deliberate, but
+    // the backend never trusts that alone, so the phrase goes through too.
+    sfetch(`${API}/api/projects/${projectId}/versions/${targetVersionId}/`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: deleteConfirmationBody(),
+    })
       .then(async (r) => { if (!r.ok) { const t = await r.text(); let m = t; try { m = JSON.parse(t).error || t; } catch {} throw new Error(m); } return r.json(); })
       .then((res) => {
         if (res.deletedRole === "BASELINE") setDeleteError("The Approved Baseline was deleted — no baseline is designated until you set one on a remaining version.");

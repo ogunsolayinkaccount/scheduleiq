@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -55,6 +56,11 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # TEST-ONLY — see scheduler/test_auth_middleware.py's module docstring.
+    # Only ever active when AUTO_AUTH_TEST_USER is True, which is only ever
+    # True when TESTING is True below. Must run after AuthenticationMiddleware
+    # (needs request.user already resolved from any real session).
+    "scheduler.test_auth_middleware.AutoAuthTestMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -86,7 +92,20 @@ DATABASES = {
     }
 }
 
-AUTH_PASSWORD_VALIDATORS = []
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
+
+# Phase 3 (Authentication and Authorization) — TESTING is True only when
+# running `manage.py test` (or pytest, if ever adopted). AUTO_AUTH_TEST_USER
+# gates scheduler.test_auth_middleware.AutoAuthTestMiddleware, which is the
+# ONLY thing that reads this flag — see that module's docstring for why it
+# exists and why it can never activate outside a test run.
+TESTING = "test" in sys.argv or "pytest" in sys.modules
+AUTO_AUTH_TEST_USER = TESTING
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

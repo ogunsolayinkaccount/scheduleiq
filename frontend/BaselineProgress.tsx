@@ -47,6 +47,74 @@ function Check({ label, checked, onChange }: { label: string; checked: boolean; 
   );
 }
 
+// Baseline Detection and Intelligence Enhancement — compact, read-only
+// panel sourced entirely from /baseline-progress/'s additive `baselineInfo`
+// key (see views._baseline_designation_info). Never computes anything
+// itself, never offers a way to designate/approve a baseline from here —
+// that stays schedule_classification, set explicitly elsewhere at import
+// or via Project Controls' version management, a deliberate human act
+// this panel only ever reports on, never performs.
+function BaselineInformationPanel({ info }: { info: any }) {
+  if (!info) return null;
+  const xer = info.selectedVersionXerInfo;
+  const classificationLabel: Record<string, string> = { APPROVED_BASELINE: "Approved Baseline", REVISED_BASELINE: "Revised Baseline" };
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Baseline Information</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 24, marginBottom: xer.available && xer.additionalProjectRecords.length > 0 ? 12 : 0 }}>
+        <div>
+          <div style={{ fontSize: 10, color: C.muted, marginBottom: 2 }}>Designated ScheduleIQ Baseline</div>
+          {info.designatedBaseline ? (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
+                {info.designatedBaseline.versionLabel} <span style={{ fontWeight: 400, color: C.muted2 }}>({formatDataDate(info.designatedBaseline.dataDate)})</span>
+              </div>
+              <div style={{ fontSize: 10, color: C.muted2, marginTop: 2 }}>
+                Source: ScheduleIQ classification — {classificationLabel[info.designatedBaseline.classification] || info.designatedBaseline.classification}, never a P6 in-file assignment
+              </div>
+            </>
+          ) : <div style={{ fontSize: 13, color: C.muted2 }}>None designated</div>}
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: C.muted, marginBottom: 2 }}>Imported Baseline Versions</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: C.text, fontFamily: "'DM Mono',monospace" }}>{info.importedBaselineVersionCount}</div>
+          <div style={{ fontSize: 10, color: C.muted2, marginTop: 2 }}>Versions explicitly classified Approved/Revised Baseline — a deliberate ScheduleIQ designation, not file-derived.</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: C.muted, marginBottom: 2 }}>Approved Baseline Versions</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: info.approvedBaselineVersionCount > 0 ? C.green : C.muted2, fontFamily: "'DM Mono',monospace" }}>{info.approvedBaselineVersionCount}</div>
+          <div style={{ fontSize: 10, color: C.muted2, marginTop: 2 }}>ScheduleIQ has no baseline-approval workflow yet — reflects only what's been marked approved elsewhere, if anything.</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: C.muted, marginBottom: 2 }}>Additional XER Project Records</div>
+          {xer.available ? (
+            <div style={{ fontSize: 18, fontWeight: 800, color: xer.additionalProjectRecordCount > 0 ? C.gold : C.text, fontFamily: "'DM Mono',monospace" }}>{xer.additionalProjectRecordCount}</div>
+          ) : <div style={{ fontSize: 13, color: C.muted2 }}>Not Available</div>}
+          <div style={{ fontSize: 10, color: C.muted2, marginTop: 2 }}>Potential baseline references found in the selected version's source file — NOT confirmed baselines.</div>
+        </div>
+      </div>
+
+      {xer.available && xer.additionalProjectRecords.length > 0 && (
+        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+          <div style={{ fontSize: 10, color: C.muted, marginBottom: 6 }}>
+            Record details — these are additional PROJECT rows found in the file (commonly produced by P6's "Export with Baselines"), not confirmed baselines. Standard XER content cannot establish which project a baseline formally belongs to, so that is never guessed.
+          </div>
+          {xer.additionalProjectRecords.map((r: any, i: number) => (
+            <div key={i} style={{ fontSize: 12, color: C.text, display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 4 }}>
+              <span style={{ fontFamily: "monospace", color: C.muted2 }}>{r.projectId}</span>
+              <span>{r.projectName || "Not Available"}</span>
+              <span>Data Date: {r.dataDate || "Not Available"}</span>
+              <span style={{ color: r.hasCompleteScheduleData ? C.green : C.amber }}>
+                {r.hasCompleteScheduleData ? `Complete schedule data (${r.activityCount} activities)` : "Record only — no schedule data in this file"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Metric({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
     <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 14px", minWidth: 130, flex: "1 1 130px" }}>
@@ -239,6 +307,8 @@ export default function BaselineProgress({ initialProjectId, onManageVersions }:
 
       {projectId && full && !loading && (
         <>
+          <BaselineInformationPanel info={full.baselineInfo} />
+
           {full.baselineMessage && (
             <div style={{ background: `${C.gold}14`, border: `1px solid ${C.gold}40`, borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: C.text }}>
               ⚠ {full.baselineMessage} Designate a version with classification <strong>Approved Baseline</strong> (or <strong>Revised Baseline</strong>) at import, or pick one from the Baseline dropdown above.

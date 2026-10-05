@@ -357,9 +357,18 @@ class ImportToAnalysisEndToEndTests(TestCase):
         self.assertEqual(len(versions), 1)
         self.assertEqual(versions[0]['classification'], 'APPROVED_BASELINE')
 
-        # 4. Import Update 01 into the SAME project using projectId.
+        # 4. Import Update 01 into the SAME project using projectId. The
+        # shared SAMPLE_XER fixture only has 2 activities — below the
+        # identity evaluator's minimum population for a confident assessment
+        # (schedule_identity.MIN_POPULATION_FOR_ASSESSMENT) — AND its content
+        # never actually varies between "updates" in this fixture (only the
+        # Data Date does, which content_fingerprint deliberately does not
+        # hash), so Phase 2's commit-time enforcement would otherwise ask for
+        # confirmation here purely from fixture limitations, not any real
+        # identity/duplicate concern a real, varying schedule would raise.
         r2 = self.client.post('/api/import/commit/', data={
             'file': _upload('update01.xer', data_date='2026-09-02'), 'projectId': project_id,
+            'confirmIdentityMismatch': 'true', 'confirmDuplicateImport': 'true',
         })
         self.assertEqual(r2.status_code, 200, r2.content)
         update01_id = r2.json()['scheduleUploadId']
@@ -372,6 +381,7 @@ class ImportToAnalysisEndToEndTests(TestCase):
         # 7. Import Update 02.
         r3 = self.client.post('/api/import/commit/', data={
             'file': _upload('update02.xer', data_date='2026-09-09'), 'projectId': project_id,
+            'confirmIdentityMismatch': 'true', 'confirmDuplicateImport': 'true',
         })
         self.assertEqual(r3.status_code, 200, r3.content)
         update02_id = r3.json()['scheduleUploadId']
@@ -429,14 +439,23 @@ class HistoricalImportTests(TestCase):
         })
         project_id = r1.json()['projectId']
 
+        # The shared SAMPLE_XER fixture only has 2 activities (below the
+        # identity evaluator's minimum population) and identical content
+        # across every "update" (only Data Date differs, which
+        # content_fingerprint deliberately excludes) — confirm both
+        # unconditionally (see test_full_workflow for the same note).
         r2 = self.client.post('/api/import/commit/', data={
             'file': _upload('u01.xer', data_date='2026-09-02'), 'projectId': project_id,
+            'confirmIdentityMismatch': 'true', 'confirmDuplicateImport': 'true',
         })
+        self.assertEqual(r2.status_code, 200, r2.content)
         update01_id = r2.json()['scheduleUploadId']
 
         r3 = self.client.post('/api/import/commit/', data={
             'file': _upload('u02.xer', data_date='2026-09-09'), 'projectId': project_id,
+            'confirmIdentityMismatch': 'true', 'confirmDuplicateImport': 'true',
         })
+        self.assertEqual(r3.status_code, 200, r3.content)
         update02_id = r3.json()['scheduleUploadId']
 
         # Preview the historical file first — it should propose PREVIOUS_UPDATE.
@@ -452,6 +471,7 @@ class HistoricalImportTests(TestCase):
         r4 = self.client.post('/api/import/commit/', data={
             'file': _upload('hist.xer', data_date='2026-08-26'), 'projectId': project_id,
             'classification': preview['proposedClassification'],
+            'confirmIdentityMismatch': 'true', 'confirmDuplicateImport': 'true',
         })
         self.assertEqual(r4.status_code, 200, r4.content)
         historical_id = r4.json()['scheduleUploadId']
@@ -497,12 +517,24 @@ class DifferentProjectWarningTests(TestCase):
         self.assertEqual(preview['p6ProjectIdMismatch']['existingP6ProjectId'], 'REAL_PROJ')
         self.assertEqual(preview['p6ProjectIdMismatch']['uploadedP6ProjectId'], 'WRONG_PROJ')
 
-        # The warning informs the user but the backend never blocks an
-        # explicit, deliberate commit — the frontend is responsible for
-        # requiring confirmation before sending it.
-        commit_resp = self.client.post('/api/import/commit/', data={
+        # The warning informs the user, and (Phase 2: Import Protection)
+        # the backend itself now refuses a commit that the identity
+        # evaluator could not confidently confirm — a direct API call that
+        # skips the preview step cannot bypass this the way it used to.
+        blocked_resp = self.client.post('/api/import/commit/', data={
             'file': _upload('wrong.xer', proj_id='WRONG_PROJ', data_date='2026-09-01'),
             'projectId': project_id,
+        })
+        self.assertEqual(blocked_resp.status_code, 409, blocked_resp.content)
+        self.assertEqual(blocked_resp.json()['error'], 'SCHEDULE_IDENTITY_UNCERTAIN')
+        self.assertEqual(ScheduleUpload.objects.filter(project_id=project_id).count(), 1)  # nothing created
+
+        # An explicit, deliberate commit (confirmIdentityMismatch=true) still
+        # succeeds — the frontend is responsible for requiring the user to
+        # confirm before sending that flag.
+        commit_resp = self.client.post('/api/import/commit/', data={
+            'file': _upload('wrong.xer', proj_id='WRONG_PROJ', data_date='2026-09-01'),
+            'projectId': project_id, 'confirmIdentityMismatch': 'true',
         })
         self.assertEqual(commit_resp.status_code, 200, commit_resp.content)
         # Source file identity is preserved on the stored version.
@@ -523,9 +555,21 @@ class DuplicateImportTests(TestCase):
         self.assertIsNotNone(preview_resp.json()['possibleDuplicate'])
         self.assertEqual(preview_resp.json()['possibleDuplicate']['matchingVersionId'], first_id)
 
-        # Re-importing anyway must not overwrite the existing version — it
-        # creates a second, independent immutable snapshot.
-        r2 = self.client.post('/api/import/commit/', data={'file': _upload('dup.xer'), 'projectId': project_id})
+        # (Phase 2: Import Protection) An exact content duplicate is now
+        # refused server-side unless explicitly confirmed — never silently
+        # accepted just because the caller skipped the preview step.
+        blocked_resp = self.client.post('/api/import/commit/', data={'file': _upload('dup.xer'), 'projectId': project_id})
+        self.assertEqual(blocked_resp.status_code, 409, blocked_resp.content)
+        self.assertEqual(blocked_resp.json()['error'], 'EXACT_DUPLICATE_IMPORT')
+        self.assertEqual(ScheduleUpload.objects.filter(project_id=project_id).count(), 1)  # nothing created
+
+        # Re-importing anyway (confirmDuplicateImport=true) must not
+        # overwrite the existing version — it creates a second, independent
+        # immutable snapshot.
+        r2 = self.client.post('/api/import/commit/', data={
+            'file': _upload('dup.xer'), 'projectId': project_id,
+            'confirmDuplicateImport': 'true', 'confirmIdentityMismatch': 'true',
+        })
         self.assertEqual(r2.status_code, 200, r2.content)
         second_id = r2.json()['scheduleUploadId']
         self.assertNotEqual(first_id, second_id)
