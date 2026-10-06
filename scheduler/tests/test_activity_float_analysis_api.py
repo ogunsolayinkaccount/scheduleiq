@@ -154,6 +154,195 @@ class FloatAnalysisApiTests(TestCase):
         self.assertGreaterEqual(len(all_det), len(top1_det))
 
 
+class ScheduleExposureApiTests(TestCase):
+    """Improve Float Analysis Visualizations — Schedule Exposure by Area/
+    WBS, Top Schedule Exposure Activities, and the Schedule Exposure
+    Matrix, all served from the SAME /float-analysis/ orchestration
+    endpoint (no competing engine, no new endpoint)."""
+
+    def setUp(self):
+        self.project = Project.objects.create(name='Schedule Exposure API Test')
+        now = timezone.now()
+        self.baseline = ScheduleUpload.objects.create(
+            project=self.project, original_filename='bl.xer', sanitized_filename='bl.xer', file_type='XER',
+            schedule_classification='APPROVED_BASELINE', data_date='2026-01-01',
+            activities_json=[
+                _act('A1', totalFloat=20.0, bFinish='2026-02-01'),
+                _act('A2', totalFloat=20.0, bFinish='2026-02-01'),
+            ],
+            upload_timestamp=now - timedelta(days=30),
+        )
+        self.previous = ScheduleUpload.objects.create(
+            project=self.project, original_filename='p.xer', sanitized_filename='p.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-07-01',
+            activities_json=[_act('A1', totalFloat=10.0), _act('A2', totalFloat=10.0)],
+            upload_timestamp=now - timedelta(days=7),
+        )
+        self.current = ScheduleUpload.objects.create(
+            project=self.project, original_filename='c.xer', sanitized_filename='c.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-08-15',
+            activities_json=[
+                # Negative float, driving, large adverse variance vs the designated baseline -> HIGH_EXPOSURE.
+                _act('A1', totalFloat=-15.0, isCritical=True, onLongestPath=True,
+                     earlyFinish='2026-03-10', area='Area C'),
+                # Healthy float, small variance -> CONTROLLED_MONITOR.
+                _act('A2', totalFloat=25.0, isCritical=False, earlyFinish='2026-02-03', area='Area A'),
+            ],
+            upload_timestamp=now,
+        )
+
+    def _url(self, **params):
+        base = f'/api/projects/{self.project.id}/float-analysis/?currentVersion={self.current.id}&baselineVersion={self.baseline.id}'
+        for k, v in params.items():
+            base += f'&{k}={v}'
+        return base
+
+    def test_new_sections_present_with_thresholds(self):
+        resp = self.client.get(self._url(previousVersion=self.previous.id))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        for key in ('thresholds', 'topScheduleExposure', 'exposureMatrix'):
+            self.assertIn(key, body)
+        self.assertEqual(body['thresholds']['nearCriticalFloatDays'], 10.0)
+        self.assertEqual(body['thresholds']['severeNegativeFloatDays'], -10.0)
+        self.assertEqual(body['thresholds']['baselineVarianceDays'], 10.0)
+
+    def test_embedded_p6_scatter_keeps_working_without_any_designated_baseline(self):
+        # Final Baseline Variance Architecture Review, test 6: the EXISTING
+        # Float vs Finish Variance scatter (finishVarianceDays, the
+        # embedded P6 bFinish/target_end_date field) must keep working
+        # completely independently of whether a ScheduleIQ baseline
+        # VERSION is designated at all — it was never coupled to that in
+        # the first place.
+        project = Project.objects.create(name='Embedded P6 Scatter Independence Test')
+        current = ScheduleUpload.objects.create(
+            project=project, original_filename='c.xer', sanitized_filename='c.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-08-15',
+            activities_json=[_act('A1', totalFloat=-5.0, bFinish='2026-01-01', earlyFinish='2026-01-20')],
+        )
+        resp = self.client.get(f'/api/projects/{project.id}/float-analysis/?currentVersion={current.id}')
+        body = resp.json()
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(body['baselineVersionId'])
+        scatter = body['floatVsFinishVarianceScatter']
+        self.assertEqual(len(scatter), 1)
+        self.assertEqual(scatter[0]['finishVarianceDays'], 19)
+        # And the Approved Baseline matrix is correctly unavailable alongside it.
+        self.assertFalse(body['exposureMatrix']['available'])
+
+    def test_heatmap_cells_carry_zero_float_and_driving_counts(self):
+        resp = self.client.get(self._url(previousVersion=self.previous.id, heatmapGroupBy='area'))
+        cells = resp.json()['heatmap']['cells']
+        area_c = next(c for c in cells if c['group'] == 'Area C')
+        self.assertEqual(area_c['drivingCount'], 1)
+
+    def test_top_schedule_exposure_only_lists_negative_float_sorted(self):
+        resp = self.client.get(self._url(previousVersion=self.previous.id))
+        exposure = resp.json()['topScheduleExposure']
+        self.assertEqual([e['activityId'] for e in exposure], ['A1'])
+        self.assertEqual(exposure[0]['currentTotalFloat'], -15.0)
+        self.assertTrue(exposure[0]['driving'])
+
+    def test_top_schedule_exposure_respects_area_filter(self):
+        resp = self.client.get(self._url(previousVersion=self.previous.id, area='Area A'))
+        exposure = resp.json()['topScheduleExposure']
+        self.assertEqual(exposure, [])  # A1 (the only negative-float activity) is in Area C, filtered out
+
+    def test_matrix_available_current_plus_baseline_no_previous(self):
+        # Final Baseline Variance Architecture Review, test 1: a designated
+        # baseline + current is SUFFICIENT — a previous update must never
+        # be required to compute Current vs Approved Baseline variance.
+        project = Project.objects.create(name='Baseline No Previous Test')
+        now = timezone.now()
+        baseline = ScheduleUpload.objects.create(
+            project=project, original_filename='bl.xer', sanitized_filename='bl.xer', file_type='XER',
+            schedule_classification='APPROVED_BASELINE', data_date='2026-01-01',
+            activities_json=[_act('A1', totalFloat=20.0, bFinish='2026-02-01')],
+            upload_timestamp=now - timedelta(days=30),
+        )
+        current = ScheduleUpload.objects.create(
+            project=project, original_filename='c.xer', sanitized_filename='c.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-08-15',
+            activities_json=[_act('A1', totalFloat=-5.0, earlyFinish='2026-03-10', bFinish='2026-02-01')],
+            upload_timestamp=now,
+        )
+        resp = self.client.get(
+            f'/api/projects/{project.id}/float-analysis/?currentVersion={current.id}&baselineVersion={baseline.id}'
+        )
+        body = resp.json()
+        self.assertEqual(resp.status_code, 200, resp.content)
+        # Only baseline + current exist for this project — no genuinely
+        # separate update between them. (PREVIOUS auto-resolves to the
+        # baseline itself here per _resolve_previous_and_current's own
+        # documented fallback — that's a pre-existing, unrelated rule; the
+        # point this test proves is that the matrix does not NEED a real
+        # third version to compute baseline variance.)
+        matrix = body['exposureMatrix']
+        self.assertTrue(matrix['available'])
+        self.assertEqual(matrix['points'][0]['quadrant'], 'HIGH_EXPOSURE')  # negative float, 37d adverse variance
+
+    def test_matrix_available_current_plus_baseline_plus_previous(self):
+        # Test 2: with all three present, baseline variance AND update
+        # movement are both available (and are different numbers).
+        resp = self.client.get(self._url(previousVersion=self.previous.id))
+        body = resp.json()
+        matrix = body['exposureMatrix']
+        self.assertTrue(matrix['available'])
+        by_id = {p['activityId']: p for p in matrix['points']}
+        self.assertEqual(by_id['A1']['quadrant'], 'HIGH_EXPOSURE')
+        self.assertEqual(by_id['A2']['quadrant'], 'CONTROLLED_MONITOR')
+
+    def test_matrix_unavailable_current_plus_previous_no_baseline(self):
+        # Test 3: update-to-update movement works fine, but Approved
+        # Baseline variance is correctly unavailable without a designated
+        # baseline — never silently substituted with embedded-bFinish
+        # variance or an empty, unexplained points list.
+        project = Project.objects.create(name='No Designated Baseline Test')
+        now = timezone.now()
+        previous = ScheduleUpload.objects.create(
+            project=project, original_filename='p.xer', sanitized_filename='p.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-07-01',
+            activities_json=[_act('A1', totalFloat=10.0)], upload_timestamp=now - timedelta(days=7),
+        )
+        current = ScheduleUpload.objects.create(
+            project=project, original_filename='c.xer', sanitized_filename='c.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-08-15',
+            activities_json=[_act('A1', totalFloat=-5.0)], upload_timestamp=now,
+        )
+        resp = self.client.get(
+            f'/api/projects/{project.id}/float-analysis/?currentVersion={current.id}&previousVersion={previous.id}'
+        )
+        body = resp.json()
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(body['baselineVersionId'])
+        matrix = body['exposureMatrix']
+        self.assertFalse(matrix['available'])
+        self.assertIn('unavailable', matrix['reason'].lower())
+
+    def test_matrix_unavailable_current_only(self):
+        # Test 4: a single version, nothing else — both comparison types
+        # unavailable; the rest of Float Analysis still works.
+        project = Project.objects.create(name='Current Only Test')
+        current = ScheduleUpload.objects.create(
+            project=project, original_filename='c.xer', sanitized_filename='c.xer', file_type='XER',
+            schedule_classification='CURRENT_UPDATE', data_date='2026-08-15',
+            activities_json=[_act('A1', totalFloat=-5.0)],
+        )
+        resp = self.client.get(f'/api/projects/{project.id}/float-analysis/?currentVersion={current.id}')
+        body = resp.json()
+        self.assertEqual(resp.status_code, 200, resp.content)
+        matrix = body['exposureMatrix']
+        self.assertFalse(matrix['available'])
+        self.assertIn('unavailable', matrix['reason'].lower())
+        self.assertEqual(matrix['points'], [])
+        self.assertTrue(body['summary']['activitiesAnalyzed'] >= 1)  # the rest of the page keeps working
+
+    def test_exposure_matrix_thresholds_never_hardcoded_independently(self):
+        resp = self.client.get(self._url(previousVersion=self.previous.id))
+        body = resp.json()
+        self.assertEqual(body['exposureMatrix']['thresholds']['varianceDays'], body['thresholds']['baselineVarianceDays'])
+
+
 class CompletedActivityFloatApiTests(TestCase):
     """P6 behavior: a completed activity's Current Total Float displays as
     Unavailable ('—'), not 0, and is excluded from actionable current-float

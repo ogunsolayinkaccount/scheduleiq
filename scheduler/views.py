@@ -64,6 +64,7 @@ from . import baseline_progress
 from . import update_intelligence
 from . import schedule_identity
 from . import contractual_milestones
+from . import issue_register
 
 
 def serialize_date(value):
@@ -4739,6 +4740,7 @@ def _serialize_mitigation_action(a):
         'id': str(a.id), 'projectId': str(a.project_id),
         'riskKey': a.risk.risk_key if a.risk_id else None,
         'scenarioId': str(a.scenario_id) if a.scenario_id else None,
+        'issueId': str(a.issue_id) if a.issue_id else None,
         'description': a.description, 'owner': a.owner,
         'dueDate': a.due_date.isoformat() if a.due_date else None,
         'status': a.status, 'notes': a.notes,
@@ -4762,6 +4764,9 @@ def project_mitigation_actions(request, pk):
         risk_key = request.GET.get('riskKey')
         if risk_key:
             actions = actions.filter(risk__risk_key=risk_key)
+        issue_id = request.GET.get('issueId')
+        if issue_id:
+            actions = actions.filter(issue_id=issue_id)
         status_filter = request.GET.get('status')
         if status_filter:
             actions = actions.filter(status=status_filter)
@@ -4786,8 +4791,15 @@ def project_mitigation_actions(request, pk):
         if not scenario:
             return error_response('scenarioId does not belong to this project', status=404)
 
+    issue = None
+    if body.get('issueId'):
+        from .models import ProjectIssue
+        issue = ProjectIssue.objects.filter(pk=body['issueId'], project=project).first()
+        if not issue:
+            return error_response('issueId does not belong to this project', status=404)
+
     action = MitigationAction.objects.create(
-        project=project, risk=risk, scenario=scenario, description=description,
+        project=project, risk=risk, scenario=scenario, issue=issue, description=description,
         owner=body.get('owner') or '', due_date=parse_date(body['dueDate']) if body.get('dueDate') else None,
         notes=body.get('notes') or '',
     )
@@ -4842,6 +4854,364 @@ def project_mitigation_action_detail(request, pk, action_id):
 
     action.save()
     return JsonResponse(_serialize_mitigation_action(action))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET/POST /api/projects/<id>/issues/
+# GET/PATCH/DELETE /api/projects/<id>/issues/<issue_id>/
+# ─────────────────────────────────────────────────────────────────────────────
+# Project Issue Tracking — a human-controlled Issue Register, deliberately
+# separate from the Risk Register (see models.ProjectIssue's docstring and
+# issue_register.py's module docstring for the Risk-vs-Issue distinction
+# this whole feature preserves). ScheduleIQ never creates an Issue from
+# schedule conditions; every row is a deliberate PM/Scheduler entry.
+# Schedule exposure for linked activities is computed fresh on every
+# request (never stored) and is always reported SEPARATELY from the
+# human-set `severity` field — the two are never conflated into one score.
+
+def _contractual_milestone_activity_ids(project):
+    from .models import MilestoneDefinition
+    return {m.activity_id for m in MilestoneDefinition.objects.filter(project=project) if m.is_contractual and m.activity_id}
+
+
+def _serialize_project_issue(issue, exposure=None, overdue=None):
+    data = {
+        'id': str(issue.id), 'projectId': str(issue.project_id),
+        # The permanent user-facing reference — always derived from the
+        # authoritative issue_number (never stored separately, so there is
+        # nothing to keep in sync). Zero-padded to 4 digits as a minimum
+        # width, never a truncation: issue_number=10001 renders
+        # "ISS-10001", not "ISS-0001".
+        'issueNumber': issue.issue_number, 'reference': f'ISS-{issue.issue_number:04d}',
+        'title': issue.title, 'description': issue.description,
+        'category': issue.category, 'status': issue.status, 'severity': issue.severity,
+        'dateIdentified': issue.date_identified.isoformat() if issue.date_identified else None,
+        'owner': issue.owner, 'requiredAction': issue.required_action,
+        'targetResolutionDate': issue.target_resolution_date.isoformat() if issue.target_resolution_date else None,
+        'actualResolutionDate': issue.actual_resolution_date.isoformat() if issue.actual_resolution_date else None,
+        'scheduleImpact': issue.schedule_impact, 'costImpact': issue.cost_impact,
+        'affectedArea': issue.affected_area,
+        'linkedActivityIds': issue.linked_activity_ids or [],
+        'linkedMilestoneId': str(issue.linked_milestone_id) if issue.linked_milestone_id else None,
+        'sourceReference': issue.source_reference, 'notes': issue.notes,
+        'createdBy': issue.created_by or None, 'createdAt': issue.created_at.isoformat(),
+        'updatedBy': issue.updated_by or None, 'updatedAt': issue.updated_at.isoformat(),
+    }
+    if exposure is not None:
+        data['exposure'] = exposure
+    if overdue is not None:
+        data['overdue'] = overdue
+    return data
+
+
+@require_role('VIEWER', POST='SCHEDULER')
+@require_http_methods(['GET', 'POST'])
+def project_issues(request, pk):
+    """
+    GET query params: status, severity, category, owner (contains), area
+      (contains), scheduleExposure=negativeFloat|drivingPath|any,
+      milestoneImpact=true, overdueOnly=true, currentVersion (defaults to
+      the project's CURRENT-role version, same convention as every other
+      analysis endpoint — see _resolve_latest_version).
+
+    Summary counts in the response always reflect the FULL unfiltered
+    register for this project, never the filtered `issues` list, so the
+    summary cards stay stable while a scheduler narrows the table below
+    them.
+    """
+    from .models import (
+        ISSUE_ACTIVE_STATUSES, ISSUE_CATEGORY_CHOICES, ISSUE_SEVERITY_CHOICES, ISSUE_STATUS_CHOICES,
+        Project, ProjectIssue,
+    )
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    if request.method == 'GET':
+        issues_qs = ProjectIssue.objects.filter(project=project)
+        if request.GET.get('status'):
+            issues_qs = issues_qs.filter(status=request.GET['status'])
+        if request.GET.get('severity'):
+            issues_qs = issues_qs.filter(severity=request.GET['severity'])
+        if request.GET.get('category'):
+            issues_qs = issues_qs.filter(category=request.GET['category'])
+        if request.GET.get('owner'):
+            issues_qs = issues_qs.filter(owner__icontains=request.GET['owner'])
+        if request.GET.get('area'):
+            issues_qs = issues_qs.filter(affected_area__icontains=request.GET['area'])
+        issues = list(issues_qs)
+
+        # Schedule exposure — computed fresh against the resolved current
+        # version, never stored. No version at all degrades gracefully:
+        # the register is still listed, just without exposure data — an
+        # Issue Register must not go blank merely because nothing has been
+        # imported yet.
+        version = _resolve_latest_version(project, request.GET.get('currentVersion') or request.GET.get('version'))
+        exposure_by_id = {}
+        current_version_info = None
+        if version:
+            current_dd = _effective_data_date(version)
+            by_id, _pred_of, _succ_of = driving_chain.build_adjacency(version.activities_json)
+            reach_map = driving_chain.compute_milestone_reachability_map(version.activities_json)
+            contractual_ids = _contractual_milestone_activity_ids(project)
+            for issue in issues:
+                exposure_by_id[issue.id] = issue_register.assemble_exposure(
+                    issue.linked_activity_ids or [], by_id, reach_map, contractual_ids, current_dd,
+                )
+            current_version_info = {
+                'versionId': str(version.id), 'versionLabel': version.version_label or version.original_filename,
+                'dataDate': current_dd.isoformat() if current_dd else None,
+            }
+
+        today = timezone.localdate()
+        all_serialized = [
+            _serialize_project_issue(
+                i, exposure=exposure_by_id.get(i.id),
+                overdue=issue_register.is_issue_overdue(i.status, i.target_resolution_date, today),
+            )
+            for i in issues
+        ]
+
+        serialized = all_serialized
+        exposure_filter = request.GET.get('scheduleExposure')
+        if exposure_filter == 'negativeFloat':
+            serialized = [s for s in serialized if (s.get('exposure') or {}).get('anyNegativeFloat')]
+        elif exposure_filter == 'drivingPath':
+            serialized = [s for s in serialized if (s.get('exposure') or {}).get('anyOnDrivingPath')]
+        elif exposure_filter == 'any':
+            serialized = [
+                s for s in serialized
+                if (s.get('exposure') or {}).get('anyNegativeFloat') or (s.get('exposure') or {}).get('anyOnDrivingPath')
+            ]
+        if request.GET.get('milestoneImpact') in ('true', '1', 'True'):
+            serialized = [s for s in serialized if (s.get('exposure') or {}).get('anyReachesContractualMilestone')]
+        if request.GET.get('overdueOnly') in ('true', '1', 'True'):
+            serialized = [s for s in serialized if s.get('overdue')]
+
+        # Deterministic Field-Dashboard-style summary — NEVER AI-generated,
+        # every count is a fact already computed above.
+        active = [s for s in all_serialized if s['status'] in ISSUE_ACTIVE_STATUSES]
+        summary = {
+            'openCount': sum(1 for s in all_serialized if s['status'] == 'OPEN'),
+            'activeCount': len(active),
+            'criticalCount': sum(1 for s in active if s['severity'] == 'CRITICAL'),
+            'highCount': sum(1 for s in active if s['severity'] == 'HIGH'),
+            'overdueCount': sum(1 for s in all_serialized if s['overdue']),
+            'contractualMilestoneExposureCount': sum(1 for s in active if (s.get('exposure') or {}).get('anyReachesContractualMilestone')),
+            'negativeFloatExposureCount': sum(1 for s in active if (s.get('exposure') or {}).get('anyNegativeFloat')),
+        }
+
+        return JsonResponse({
+            'projectId': str(project.id), 'summary': summary, 'currentVersion': current_version_info,
+            'categories': [c[0] for c in ISSUE_CATEGORY_CHOICES], 'statuses': [c[0] for c in ISSUE_STATUS_CHOICES],
+            'severities': [c[0] for c in ISSUE_SEVERITY_CHOICES],
+            'issues': serialized,
+        })
+
+    # ── POST — create ───────────────────────────────────────────────────
+    from django.db import transaction
+
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    title = (body.get('title') or '').strip()
+    if not title:
+        return error_response('title is required')
+
+    category = body.get('category') or 'OTHER'
+    valid_categories = {c[0] for c in ISSUE_CATEGORY_CHOICES}
+    if category not in valid_categories:
+        return error_response(f'Unknown category. Valid: {sorted(valid_categories)}')
+
+    severity = body.get('severity') or 'MEDIUM'
+    valid_severities = {c[0] for c in ISSUE_SEVERITY_CHOICES}
+    if severity not in valid_severities:
+        return error_response(f'Unknown severity. Valid: {sorted(valid_severities)}')
+
+    status = body.get('status') or 'OPEN'
+    valid_statuses = {c[0] for c in ISSUE_STATUS_CHOICES}
+    if status not in valid_statuses:
+        return error_response(f'Unknown status. Valid: {sorted(valid_statuses)}')
+
+    linked_activity_ids = body.get('linkedActivityIds')
+    if linked_activity_ids is not None and not isinstance(linked_activity_ids, list):
+        return error_response('linkedActivityIds must be a list')
+
+    linked_milestone = None
+    if body.get('linkedMilestoneId'):
+        from .models import MilestoneDefinition
+        linked_milestone = MilestoneDefinition.objects.filter(pk=body['linkedMilestoneId'], project=project).first()
+        if not linked_milestone:
+            return error_response('linkedMilestoneId does not belong to this project', status=404)
+
+    try:
+        date_identified = parse_date(body['dateIdentified']) if body.get('dateIdentified') else timezone.localdate()
+    except Exception:
+        return error_response('dateIdentified could not be parsed. Use YYYY-MM-DD.')
+    target_resolution_date = parse_date(body['targetResolutionDate']) if body.get('targetResolutionDate') else None
+    actual_resolution_date = parse_date(body['actualResolutionDate']) if body.get('actualResolutionDate') else None
+
+    # Per-project sequential numbering from Project.next_issue_number — a
+    # monotonic counter, NEVER derived from MAX(issue_number) among
+    # existing rows. Deriving it from the current MAX would let a deleted
+    # issue's number be reused by the next issue created, violating the
+    # Issue Register's explicit permanence guarantee (an Issue ID must
+    # never be reused, even after deletion). select_for_update + atomic
+    # increment avoids a race under concurrent creation — the same
+    # concurrency-safety pattern already used for import locking.
+    with transaction.atomic():
+        locked_project = Project.objects.select_for_update().get(pk=project.id)
+        next_number = locked_project.next_issue_number
+        locked_project.next_issue_number = next_number + 1
+        locked_project.save(update_fields=['next_issue_number'])
+
+    issue = ProjectIssue.objects.create(
+        project=project, issue_number=next_number, title=title, description=body.get('description') or '',
+        category=category, status=status, severity=severity, date_identified=date_identified,
+        owner=body.get('owner') or '', required_action=body.get('requiredAction') or '',
+        target_resolution_date=target_resolution_date, actual_resolution_date=actual_resolution_date,
+        schedule_impact=bool(body.get('scheduleImpact')), cost_impact=bool(body.get('costImpact')),
+        affected_area=body.get('affectedArea') or '', linked_activity_ids=linked_activity_ids or [],
+        linked_milestone=linked_milestone, source_reference=body.get('sourceReference') or '',
+        notes=body.get('notes') or '', created_by=request.user.username, updated_by=request.user.username,
+    )
+
+    _write_audit_log(
+        request.user.username, 'CREATE_ISSUE', 'ProjectIssue', issue.id, outcome='SUCCESS',
+        new_value={'projectId': str(project.id), 'title': title, 'status': status, 'severity': severity},
+        request_id=body.get('requestId') or str(uuid.uuid4()),
+    )
+
+    return JsonResponse(_serialize_project_issue(issue), status=201)
+
+
+@require_role('VIEWER', PATCH='SCHEDULER', DELETE='SCHEDULER')
+@require_http_methods(['GET', 'PATCH', 'DELETE'])
+def project_issue_detail(request, pk, issue_id):
+    from .models import ISSUE_CATEGORY_CHOICES, ISSUE_SEVERITY_CHOICES, ISSUE_STATUS_CHOICES, Project, ProjectIssue
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    issue = ProjectIssue.objects.filter(pk=issue_id, project=project).first()
+    if not issue:
+        return error_response('Issue not found', status=404)
+
+    if request.method == 'GET':
+        version = _resolve_latest_version(project, request.GET.get('currentVersion') or request.GET.get('version'))
+        if version:
+            exposure = issue_register.compute_issue_schedule_exposure(
+                issue.linked_activity_ids or [], version.activities_json, _effective_data_date(version),
+                _contractual_milestone_activity_ids(project),
+            )
+        else:
+            # No schedule version exists yet for this project — honestly
+            # reported, never a fabricated mapping (Phase 3's explicit rule).
+            exposure = {
+                'hasLinkedActivities': bool(issue.linked_activity_ids), 'currentDataDate': None, 'activities': [],
+                'reason': 'No schedule version available for this project.',
+            }
+        overdue = issue_register.is_issue_overdue(issue.status, issue.target_resolution_date, timezone.localdate())
+        return JsonResponse(_serialize_project_issue(issue, exposure=exposure, overdue=overdue))
+
+    if request.method == 'DELETE':
+        previous = _serialize_project_issue(issue)
+        issue.delete()
+        _write_audit_log(
+            request.user.username, 'DELETE_ISSUE', 'ProjectIssue', issue_id, outcome='SUCCESS',
+            previous_value=previous, request_id=request.GET.get('requestId') or str(uuid.uuid4()),
+        )
+        return JsonResponse({'deleted': True})
+
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    previous = _serialize_project_issue(issue)
+    changed_status = False
+
+    if 'title' in body:
+        title = (body['title'] or '').strip()
+        if not title:
+            return error_response('title cannot be blank')
+        issue.title = title
+    if 'description' in body:
+        issue.description = body['description'] or ''
+    if 'category' in body:
+        valid = {c[0] for c in ISSUE_CATEGORY_CHOICES}
+        if body['category'] not in valid:
+            return error_response(f'Unknown category. Valid: {sorted(valid)}')
+        issue.category = body['category']
+    if 'severity' in body:
+        valid = {c[0] for c in ISSUE_SEVERITY_CHOICES}
+        if body['severity'] not in valid:
+            return error_response(f'Unknown severity. Valid: {sorted(valid)}')
+        issue.severity = body['severity']
+    if 'status' in body:
+        valid = {c[0] for c in ISSUE_STATUS_CHOICES}
+        if body['status'] not in valid:
+            return error_response(f'Unknown status. Valid: {sorted(valid)}')
+        if body['status'] != issue.status:
+            changed_status = True
+        issue.status = body['status']
+        # Resolve/Close workflow — auto-stamp actual_resolution_date on the
+        # transition INTO Resolved/Closed (same auto-stamp discipline
+        # MitigationAction.completed_at already uses for its own
+        # Complete transition), and clear it if moved back out rather than
+        # leaving a now-inaccurate date behind.
+        if issue.status in ('RESOLVED', 'CLOSED') and not issue.actual_resolution_date:
+            issue.actual_resolution_date = timezone.localdate()
+        elif issue.status not in ('RESOLVED', 'CLOSED'):
+            issue.actual_resolution_date = None
+    if 'owner' in body:
+        issue.owner = body['owner'] or ''
+    if 'requiredAction' in body:
+        issue.required_action = body['requiredAction'] or ''
+    if 'targetResolutionDate' in body:
+        issue.target_resolution_date = parse_date(body['targetResolutionDate']) if body['targetResolutionDate'] else None
+    if 'actualResolutionDate' in body:
+        issue.actual_resolution_date = parse_date(body['actualResolutionDate']) if body['actualResolutionDate'] else None
+    if 'scheduleImpact' in body:
+        issue.schedule_impact = bool(body['scheduleImpact'])
+    if 'costImpact' in body:
+        issue.cost_impact = bool(body['costImpact'])
+    if 'affectedArea' in body:
+        issue.affected_area = body['affectedArea'] or ''
+    if 'linkedActivityIds' in body:
+        if body['linkedActivityIds'] is not None and not isinstance(body['linkedActivityIds'], list):
+            return error_response('linkedActivityIds must be a list')
+        issue.linked_activity_ids = body['linkedActivityIds'] or []
+    if 'linkedMilestoneId' in body:
+        if body['linkedMilestoneId']:
+            from .models import MilestoneDefinition
+            lm = MilestoneDefinition.objects.filter(pk=body['linkedMilestoneId'], project=project).first()
+            if not lm:
+                return error_response('linkedMilestoneId does not belong to this project', status=404)
+            issue.linked_milestone = lm
+        else:
+            issue.linked_milestone = None
+    if 'sourceReference' in body:
+        issue.source_reference = body['sourceReference'] or ''
+    if 'notes' in body:
+        issue.notes = body['notes'] or ''
+
+    issue.updated_by = request.user.username
+    issue.save()
+
+    _write_audit_log(
+        request.user.username, 'UPDATE_STATUS_ISSUE' if changed_status else 'UPDATE_ISSUE', 'ProjectIssue', issue.id,
+        outcome='SUCCESS', previous_value=previous, new_value=_serialize_project_issue(issue),
+        request_id=body.get('requestId') or str(uuid.uuid4()),
+    )
+
+    return JsonResponse(_serialize_project_issue(issue))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5248,12 +5618,37 @@ def project_field_dashboard_summary(request, pk):
         'fieldData': {'status': 'NOT_CONNECTED', 'detail': 'No field-data integration exists in ScheduleIQ.'},
     }
 
-    # ── Project Issues — no issue-tracking engine exists yet; never
-    # fabricate example issues ───────────────────────────────────────────
-    result['projectIssues'] = {
-        'available': False, 'configured': False, 'issues': [],
-        'reason': 'Project issue tracking is not yet configured in ScheduleIQ.',
-    }
+    # ── Project Issues — real register, real counts. Same orchestration
+    # discipline as every other card on this dashboard: nothing here is
+    # AI-generated or recomputed; the summary counts and the ordering of
+    # "top priority" issues are both deterministic functions of data
+    # issue_register.py and _serialize_project_issue already produce ─────
+    try:
+        from .models import ISSUE_ACTIVE_STATUSES, ProjectIssue
+        active_issues = list(ProjectIssue.objects.filter(project=project, status__in=ISSUE_ACTIVE_STATUSES))
+        by_id, _pred_of, _succ_of = driving_chain.build_adjacency(current.activities_json)
+        reach_map = driving_chain.compute_milestone_reachability_map(current.activities_json)
+        contractual_ids = _contractual_milestone_activity_ids(project)
+        today = timezone.localdate()
+        summaries = [
+            _serialize_project_issue(
+                i,
+                exposure=issue_register.assemble_exposure(i.linked_activity_ids or [], by_id, reach_map, contractual_ids, current_dd),
+                overdue=issue_register.is_issue_overdue(i.status, i.target_resolution_date, today),
+            )
+            for i in active_issues
+        ]
+        summaries.sort(key=issue_register.priority_rank, reverse=True)
+        result['projectIssues'] = {
+            'available': True, 'configured': True,
+            'openCount': sum(1 for s in summaries if s['status'] == 'OPEN'),
+            'criticalCount': sum(1 for s in summaries if s['severity'] == 'CRITICAL'),
+            'highCount': sum(1 for s in summaries if s['severity'] == 'HIGH'),
+            'overdueCount': sum(1 for s in summaries if s['overdue']),
+            'topIssues': summaries[:5],
+        }
+    except Exception as exc:
+        result['projectIssues'] = {'available': False, 'configured': True, 'reason': str(exc)}
 
     return JsonResponse(result)
 
@@ -5485,6 +5880,14 @@ def project_float_analysis(request, pk):
             'engineVersion': float_intelligence.ENGINE_VERSION,
             'includeCompleted': include_completed,
             'nearCriticalThresholdDays': activity_analysis.NEAR_CRITICAL_FLOAT_THRESHOLD,
+            # Exposed explicitly so the frontend never hardcodes these
+            # independently (Improve Float Analysis Visualizations phase) —
+            # every threshold-driven visualization reads them from here.
+            'thresholds': {
+                'nearCriticalFloatDays': activity_analysis.NEAR_CRITICAL_FLOAT_THRESHOLD,
+                'severeNegativeFloatDays': float_intelligence.SEVERE_NEGATIVE_FLOAT_THRESHOLD,
+                'baselineVarianceDays': float_intelligence.BASELINE_VARIANCE_THRESHOLD_DAYS,
+            },
             'summary': float_intelligence.compute_float_summary(rows),
             'distribution': float_intelligence.compute_float_distribution(rows),
             'baselineVsCurrentScatter': float_intelligence.compute_baseline_vs_current_scatter(rows),
@@ -5492,6 +5895,14 @@ def project_float_analysis(request, pk):
             'heatmap': float_intelligence.compute_float_heatmap(rows, heatmap_group_by),
             'floatVsFinishVarianceScatter': float_intelligence.compute_float_vs_finish_variance_scatter(rows),
             'floatVsRemainingDurationScatter': float_intelligence.compute_float_vs_remaining_duration_scatter(rows),
+            'topScheduleExposure': float_intelligence.rank_schedule_exposure(rows),
+            # A designated baseline VERSION is the only requirement —
+            # approvedBaselineVarianceDays (activity_analysis.py) is computed
+            # directly from the baseline-version match, independent of
+            # whether a PREVIOUS update exists (a previous update is only
+            # needed for update-to-update movement, a separate concept —
+            # see the Final Baseline Variance Architecture Review).
+            'exposureMatrix': float_intelligence.compute_exposure_matrix(rows, baseline_designated=bool(ctx['baseline'])),
             'topDeterioration': float_intelligence.rank_float_deterioration(rows, top_n),
             'topImprovement': float_intelligence.rank_float_improvement(rows, top_n),
             'newlyNegative': float_intelligence.list_newly_negative(rows),

@@ -38,6 +38,19 @@ from .activity_analysis import is_activity_complete
 
 ENGINE_VERSION = '1.0.0'
 
+# Reused, not reinvented: these match risk_register.py's own private
+# _SEVERE_NEGATIVE_FLOAT_THRESHOLD / _BASELINE_VARIANCE_THRESHOLD constants
+# exactly (same values, same authoritative origin — the existing Risk
+# Register severity rules) — the same cross-module constant-duplication
+# convention this codebase already uses for NEAR_CRITICAL_FLOAT_THRESHOLD
+# (activity_analysis.py/update_intelligence.py/baseline_progress.py each
+# independently declare the identical value rather than sharing an import).
+# Float Analysis's Schedule Exposure Matrix (Improve Float Analysis
+# Visualizations phase) reuses these so its quadrant boundaries are never
+# arbitrary frontend values.
+SEVERE_NEGATIVE_FLOAT_THRESHOLD = -10.0
+BASELINE_VARIANCE_THRESHOLD_DAYS = 10.0
+
 # Default analytical float bands — buckets only, never override imported
 # P6 critical status (a row with isCritical=True stays critical regardless
 # of which band its float falls in).
@@ -234,9 +247,13 @@ def compute_float_heatmap(rows: List[dict], group_by: str = 'area') -> Dict[str,
             'group': key,
             'activityCount': len(group_rows),
             'negativeFloatCount': sum(1 for r in group_rows if r['negativeFloat']),
+            'zeroFloatCount': sum(1 for r in group_rows if r['currentTotalFloat'] == 0),
             'criticalCount': sum(1 for r in group_rows if r['criticalActionable']),
             'nearCriticalCount': sum(1 for r in group_rows if r['nearCritical']),
+            'drivingCount': sum(1 for r in group_rows if r['driving']),
             'deteriorationCount': sum(1 for r in group_rows if r['floatDeteriorated']),
+            # Worst-case, never summed — Total Float is not an additive
+            # quantity across activities (see module docstring).
             'minimumTotalFloat': min(tfs) if tfs else None,
             'medianTotalFloat': _median(tfs),
             'medianFloatChange': _median(changes),
@@ -265,6 +282,112 @@ def compute_float_vs_remaining_duration_scatter(rows: List[dict]) -> List[Dict[s
         }
         for r in rows if r['remainingDuration'] is not None and r['currentTotalFloat'] is not None
     ]
+
+
+_EXPOSURE_TABLE_FIELDS = (
+    'activityId', 'activityName', 'wbs', 'area', 'currentTotalFloat', 'finishVarianceDays',
+    'approvedBaselineVarianceDays', 'currentFinish', 'activityStatus', 'critical', 'driving', 'isMilestone',
+)
+
+
+def _exposure_row(r: dict) -> Dict[str, Any]:
+    return {k: r.get(k) for k in _EXPOSURE_TABLE_FIELDS}
+
+
+def rank_schedule_exposure(rows: List[dict], top_n: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Deterministic 'Top Schedule Exposure Activities' ranking — explicitly
+    NOT a weighted composite score (Improve Float Analysis Visualizations
+    phase's explicit requirement). Candidates are actionable negative-float
+    rows only (the same `negativeFloat` flag already computed per row — a
+    completed activity's blanked currentTotalFloat can never qualify).
+
+    Sort key, in order:
+      1. Most negative current Total Float (primary)
+      2. Driving-path relevance (secondary — driving activities surface
+         first among equally-negative-float activities)
+      3. Larger adverse finish variance (tertiary tie-break; a missing
+         variance sorts last, never treated as zero)
+
+    Never truncates unless top_n is given — matches every other ranking
+    function in this module; the UI's own Top 10/20/50 selector slices
+    client-side like the existing RankTable components already do."""
+    candidates = [r for r in rows if r['negativeFloat']]
+    candidates.sort(key=lambda r: (
+        r['currentTotalFloat'],
+        0 if r['driving'] else 1,
+        -(r['finishVarianceDays'] if r['finishVarianceDays'] is not None else float('-inf')),
+    ))
+    out = [_exposure_row(r) for r in candidates]
+    return out if top_n is None else out[:top_n]
+
+
+def compute_exposure_matrix(rows: List[dict], baseline_designated: bool) -> Dict[str, Any]:
+    """Schedule Exposure Matrix — X: Approved Baseline Finish Variance
+    (`approvedBaselineVarianceDays` — Current Forecast Finish vs the
+    DESIGNATED Approved/Revised Baseline VERSION, computed directly in
+    activity_analysis.py from the baseline-version match; see that
+    module's docstring for the full distinction). Y: current Total Float.
+
+    Deliberately independent of whether a PREVIOUS update exists —
+    `baseline_designated` here means exactly one thing: a baseline
+    VERSION is designated for this project. A previous update is NEVER
+    required to compute Current vs Approved Baseline variance (that
+    pairing is only needed for update-to-update MOVEMENT, a different,
+    separately-reported concept — updateMovementDays/finishMovementDays
+    on the master row — which this matrix does not use).
+
+    This is explicitly NOT the same value as `finishVarianceDays`, which
+    compares against each activity's own embedded P6 baseline field
+    (bFinish/target_end_date) regardless of whether a ScheduleIQ baseline
+    version is designated — the two must never be conflated or
+    substituted for each other; see activity_analysis.py's docstring.
+
+    Quadrant boundaries reuse EXISTING authoritative thresholds — never
+    arbitrary frontend values: the same `negativeFloat` flag used
+    everywhere else in ScheduleIQ splits the Y axis, and
+    BASELINE_VARIANCE_THRESHOLD_DAYS (matching risk_register.py's own
+    baseline-variance severity rule) splits the X axis.
+
+        HIGH EXPOSURE      = negative float AND variance > threshold
+        FLOAT CRITICAL     = negative float AND variance <= threshold
+        VARIANCE CRITICAL  = non-negative float AND variance > threshold
+        CONTROLLED/MONITOR = non-negative float AND variance <= threshold
+
+    A row is plotted only when BOTH figures are genuinely available for
+    it — never a manufactured comparison. When no baseline version is
+    designated for this project at all, the whole matrix is reported
+    unavailable with an honest reason; the rest of Float Analysis keeps
+    working regardless."""
+    if not baseline_designated:
+        return {
+            'available': False,
+            'reason': 'Finish variance unavailable — no applicable comparison schedule is configured.',
+            'thresholds': {'varianceDays': BASELINE_VARIANCE_THRESHOLD_DAYS},
+            'points': [],
+        }
+
+    points = []
+    for r in rows:
+        tf, var = r.get('currentTotalFloat'), r.get('approvedBaselineVarianceDays')
+        if tf is None or var is None:
+            continue
+        if r['negativeFloat']:
+            quadrant = 'HIGH_EXPOSURE' if var > BASELINE_VARIANCE_THRESHOLD_DAYS else 'FLOAT_CRITICAL'
+        else:
+            quadrant = 'VARIANCE_CRITICAL' if var > BASELINE_VARIANCE_THRESHOLD_DAYS else 'CONTROLLED_MONITOR'
+        points.append({
+            'activityId': r['activityId'], 'activityName': r['activityName'],
+            'wbs': r.get('wbs'), 'area': r.get('area'),
+            'currentTotalFloat': tf, 'approvedBaselineVarianceDays': var,
+            'quadrant': quadrant, 'critical': r.get('critical'), 'driving': r.get('driving'),
+            'activityStatus': r.get('activityStatus'),
+        })
+
+    return {
+        'available': True, 'reason': None,
+        'thresholds': {'varianceDays': BASELINE_VARIANCE_THRESHOLD_DAYS},
+        'points': points,
+    }
 
 
 _DETERIORATION_TABLE_FIELDS = (

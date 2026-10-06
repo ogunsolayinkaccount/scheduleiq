@@ -195,6 +195,40 @@ class CsrfProtectionTests(TestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         self.assertTrue(Project.objects.filter(name='With Token').exists())
 
+    def test_mutating_request_with_origin_header_from_the_dev_frontend_succeeds(self):
+        # Regression test for the Metrics API 403 incident: a REAL browser
+        # sends an Origin header on every fetch() — Django's CSRF
+        # middleware verifies it against request.get_host() UNCONDITIONALLY
+        # (CsrfViewMiddleware._origin_verified, not just for HTTPS), and the
+        # Vite dev proxy (frontend/vite.config.ts, changeOrigin:true)
+        # rewrites the Host header this backend sees to its own port, so
+        # the browser's genuine Origin (the Vite dev server's own origin)
+        # never matched — rejecting EVERY authenticated mutating request
+        # from the real app, regardless of role or token correctness. The
+        # default test Client never reproduces this because it doesn't
+        # send an Origin header at all, which is exactly why 1270 passing
+        # tests never caught it. CSRF_TRUSTED_ORIGINS (seglc_backend/
+        # settings.py) is the fix — this proves it holds.
+        token = self._login_and_get_csrf_token()
+        resp = self.enforcing_client.post(
+            '/api/projects/', data=json.dumps({'name': 'From Dev Frontend'}), content_type='application/json',
+            HTTP_X_CSRFTOKEN=token, HTTP_ORIGIN='http://localhost:5170',
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(Project.objects.filter(name='From Dev Frontend').exists())
+
+    def test_mutating_request_with_an_untrusted_origin_is_still_rejected(self):
+        # CSRF_TRUSTED_ORIGINS is a narrow allowlist, not a blanket
+        # weakening — an origin that was never added to it must still be
+        # refused, proving the fix didn't open this up generally.
+        token = self._login_and_get_csrf_token()
+        resp = self.enforcing_client.post(
+            '/api/projects/', data=json.dumps({'name': 'From Evil Origin'}), content_type='application/json',
+            HTTP_X_CSRFTOKEN=token, HTTP_ORIGIN='http://evil.example.com',
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(Project.objects.filter(name='From Evil Origin').exists())
+
     def test_get_requests_never_need_a_csrf_token(self):
         self._login_and_get_csrf_token()
         resp = self.enforcing_client.get('/api/projects/')

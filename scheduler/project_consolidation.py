@@ -97,8 +97,8 @@ def build_consolidation_plan(name_contains: Optional[str] = None,
                              app_files: Optional[List[dict]] = None) -> Dict[str, Any]:
     from .models import (
         ActivityCodeType, Calendar, ContractualMilestoneRevision, CostAccount, ManualCostEntry, MilestoneDefinition,
-        MitigationAction, Project, ProjectControlsReport, RecoveryScenario, ScheduleAnalysis, ScheduleDocument,
-        ScheduleRisk, ScheduleUpload, UDFType,
+        MitigationAction, Project, ProjectControlsReport, ProjectIssue, RecoveryScenario, ScheduleAnalysis,
+        ScheduleDocument, ScheduleRisk, ScheduleUpload, UDFType,
     )
     from . import views as V
 
@@ -395,6 +395,7 @@ def build_consolidation_plan(name_contains: Optional[str] = None,
     for l in lineages:
         canon = l['canonicalProject']['projectId']
         canon_risk_keys = set(ScheduleRisk.objects.filter(project_id=canon).values_list('risk_key', flat=True))
+        canon_issue_numbers = set(ProjectIssue.objects.filter(project_id=canon).values_list('issue_number', flat=True))
         source_projects = sorted({e['projectId'] for e in l['versions']} - {canon})
         for sp in source_projects:
             frm, to = {'projectId': sp}, {'projectId': canon}
@@ -413,6 +414,12 @@ def build_consolidation_plan(name_contains: Optional[str] = None,
             _add('ScheduleRisk', len(conflict), 'project', frm, to, 'MERGE_CONFLICT',
                  'same risk_key already exists on the canonical project (unique per project) - needs a decision')
             canon_risk_keys |= src_keys
+            src_issue_numbers = set(ProjectIssue.objects.filter(project_id=sp).values_list('issue_number', flat=True))
+            issue_conflict = src_issue_numbers & canon_issue_numbers
+            _add('ProjectIssue', len(src_issue_numbers - issue_conflict), 'project', frm, to, 'REPOINT', 'Project Issue Register entries')
+            _add('ProjectIssue', len(issue_conflict), 'project', frm, to, 'MERGE_CONFLICT',
+                 'same issue_number already exists on the canonical project (unique per project) - needs a decision')
+            canon_issue_numbers |= src_issue_numbers
         for e in l['versions']:
             if e['action'] in ('RETAIN', 'HOLD') and e['moveToCanonical']:
                 refs.append({'model': 'ScheduleUpload', 'count': 1, 'scope': 'version',
@@ -587,8 +594,8 @@ def apply_consolidation_plan(name_contains: Optional[str], app_files: Optional[L
     versions are moved, never deleted. Refuses on any mismatch."""
     from django.db import transaction
     from .models import (
-        ManualCostEntry, MilestoneDefinition, MitigationAction, Project, ProjectControlsReport, RecoveryScenario,
-        ScheduleAnalysis, ScheduleDocument, ScheduleRisk, ScheduleUpload,
+        ManualCostEntry, MilestoneDefinition, MitigationAction, Project, ProjectControlsReport, ProjectIssue,
+        RecoveryScenario, ScheduleAnalysis, ScheduleDocument, ScheduleRisk, ScheduleUpload,
     )
     from . import views as V
 
@@ -652,6 +659,7 @@ def apply_consolidation_plan(name_contains: Optional[str], app_files: Optional[L
                 bump('ScheduleDocument', ScheduleDocument.objects.filter(project_id=sp).update(project_id=canon_id))
                 bump('ManualCostEntry', ManualCostEntry.objects.filter(project_id=sp).update(project_id=canon_id))
                 bump('ScheduleRisk', ScheduleRisk.objects.filter(project_id=sp).update(project_id=canon_id))
+                bump('ProjectIssue', ProjectIssue.objects.filter(project_id=sp).update(project_id=canon_id))
                 # ContractualMilestoneRevision has no project_id of its own —
                 # it follows its MilestoneDefinition parent automatically.
                 bump('MilestoneDefinition', MilestoneDefinition.objects.filter(project_id=sp).update(project_id=canon_id))
@@ -673,7 +681,8 @@ def apply_consolidation_plan(name_contains: Optional[str], app_files: Optional[L
                 if proj is None or proj.schedule_versions.exists() or sp not in deletable_projects:
                     continue
                 leftovers = (proj.recovery_scenarios.count() + proj.schedule_risks.count() + proj.mitigation_actions.count()
-                             + proj.documents.count() + proj.controls_reports.count() + proj.manual_cost_entries.count())
+                             + proj.documents.count() + proj.controls_reports.count() + proj.manual_cost_entries.count()
+                             + proj.issues.count())
                 if leftovers:
                     continue                      # never delete a project that still owns records
                 V._delete_project(proj)
@@ -698,8 +707,8 @@ def apply_consolidation_plan(name_contains: Optional[str], app_files: Optional[L
 def reference_integrity() -> Dict[str, int]:
     """Counts of records whose project and version references disagree (all 0 when clean)."""
     from django.db.models import F
-    from .models import (ManualCostEntry, MitigationAction, Project, ProjectControlsReport, RecoveryScenario,
-                         ScheduleDocument, ScheduleRisk)
+    from .models import (ManualCostEntry, MitigationAction, Project, ProjectControlsReport, ProjectIssue,
+                         RecoveryScenario, ScheduleDocument, ScheduleRisk)
     return {
         'recoveryScenarioProjectMismatch': RecoveryScenario.objects.exclude(project_id=F('schedule_upload__project_id')).count(),
         'reportProjectMismatch': ProjectControlsReport.objects.filter(schedule_upload__isnull=False).exclude(project_id=F('schedule_upload__project_id')).count(),
@@ -707,6 +716,8 @@ def reference_integrity() -> Dict[str, int]:
         'costEntryProjectMismatch': ManualCostEntry.objects.filter(schedule_upload__isnull=False).exclude(project_id=F('schedule_upload__project_id')).count(),
         'riskFirstVersionProjectMismatch': ScheduleRisk.objects.filter(first_identified_version__isnull=False).exclude(project_id=F('first_identified_version__project_id')).count(),
         'mitigationScenarioProjectMismatch': MitigationAction.objects.filter(scenario__isnull=False).exclude(project_id=F('scenario__project_id')).count(),
+        'mitigationIssueProjectMismatch': MitigationAction.objects.filter(issue__isnull=False).exclude(project_id=F('issue__project_id')).count(),
+        'issueMilestoneProjectMismatch': ProjectIssue.objects.filter(linked_milestone__isnull=False).exclude(project_id=F('linked_milestone__project_id')).count(),
         'projectsWithNoVersions': Project.objects.filter(schedule_versions__isnull=True).count(),
     }
 

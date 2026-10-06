@@ -16,6 +16,7 @@ import FloatAnalysis from "./FloatAnalysis";
 import Intelligence from "./Intelligence";
 import Dashboard from "./Dashboard";
 import FieldDashboard from "./FieldDashboard";
+import IssueRegister from "./IssueRegister";
 import Reports from "./Reports";
 import DeletedVersions from "./DeletedVersions";
 import { applyLogicEdits, computeCPM, wouldCreateCycle, linkKey, type RelType, type LogicEdit, type LogicEditMap } from "./cpm";
@@ -1012,6 +1013,7 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
     {id:"activityAnalysis", label:"Activity Analysis", icon:"📋", highlight:true},
     {id:"floatAnalysis", label:"Float Analysis", icon:"🧭", highlight:true},
     {id:"riskIntel",   label:"Risk & Milestones", icon:"🌡️", highlight:true},
+    {id:"issueRegister", label:"Issue Register", icon:"📌", highlight:true},
     {id:"projectControls", label:"Project Controls", icon:"🧮", highlight:true},
     {id:"baselineProgress", label:"Baseline & Progress", icon:"📐", highlight:true},
     {id:"intelligence", label:"Intelligence",    icon:"🧠", highlight:true},
@@ -5947,6 +5949,11 @@ function AppShell(){
     setPreferredVersionId(versionId);
     setView("riskIntel");
   },[]);
+  const handleOpenIssueRegister=useCallback((projectId:string,versionId?:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setView("issueRegister");
+  },[]);
   const handleDashboardOpenProjectControls=useCallback((projectId:string,versionId:string,subTab?:string)=>{
     setPreferredProjectId(projectId);
     setPreferredSubTab(subTab);
@@ -6432,7 +6439,7 @@ function AppShell(){
             onOpenUpdateAnalysis={handleDashboardOpenUpdateAnalysis} onOpenRiskMilestones={handleDashboardOpenRiskMilestones}
             onOpenProjectControls={handleDashboardOpenProjectControls} onOpenBaselineProgress={handleDashboardOpenBaselineProgress}
             onOpenIntelligence={handleDashboardOpenIntelligence}/>}
-          {view==="fieldDashboard"                 &&<FieldDashboard initialProjectId={preferredProjectId} initialVersionId={preferredVersionId}/>}
+          {view==="fieldDashboard"                 &&<FieldDashboard initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} onOpenIssueRegister={handleOpenIssueRegister}/>}
           {M&&!metricsLoading&&view==="portfolio"  &&<PortfolioView M={M} files={files} selectedIds={selectedIds} allActivities={phasedActivities} onGoToFilter={handleGoToFilter} onGoToProject={handleGoToProject}/>}
           {M&&!metricsLoading&&view==="scurve"     &&<SCurveView M={M} allActivities={phasedActivities} files={files} selectedIds={selectedIds}/>}
           {M&&!metricsLoading&&view==="gantt"      &&<GanttView allActivities={phasedActivities} dataDate={dataDate} onGoToActivity={()=>setView("critical")}/>}
@@ -6467,6 +6474,7 @@ function AppShell(){
             onOpenActivityAnalysis={()=>{const f=files.find((x:any)=>selectedIds.includes(x.id)&&x.projectId&&x.scheduleUploadId); if(f){setPreferredProjectId(f.projectId);setPreferredVersionId(f.scheduleUploadId);} setView("activityAnalysis");}}/>}
           {view==="updateAnalysis"                  &&<UpdateAnalysis initialProjectId={preferredProjectId} onManageVersions={handleManageVersions} onAnalyzeRecovery={handleAnalyzeRecovery}/>}
           {view==="riskIntel"                        &&<RiskIntelligence initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialSubTab={preferredSubTab} initialRiskKey={preferredRiskKey}/>}
+          {view==="issueRegister"                    &&<IssueRegister initialProjectId={preferredProjectId} initialVersionId={preferredVersionId}/>}
           {view==="activityAnalysis"                  &&<ActivityAnalysis initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialFilters={preferredActivityFilters} onOpenFloatAnalysis={handleOpenFloatAnalysis} onOpenRiskRecovery={handleAnalyzeRecovery}/>}
           {view==="floatAnalysis"                     &&<FloatAnalysis initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialActivityId={preferredActivityId} initialFloatFilter={preferredFloatFilter}/>}
           {view==="projectControls"                  &&<ProjectControls initialProjectId={preferredProjectId} initialSubTab={preferredSubTab}/>}

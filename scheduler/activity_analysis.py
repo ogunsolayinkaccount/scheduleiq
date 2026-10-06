@@ -67,6 +67,31 @@ Golden rules enforced throughout:
     This is the exact convention already used by driving_chain.py/
     recovery_engine.py for "currentFinish" — reused verbatim, not
     reinvented, so Current Finish means the same thing on every page.
+  - TWO DISTINCT finish-variance concepts, never conflated or substituted
+    for each other (Improve Float Analysis Visualizations — Final Baseline
+    Variance Architecture Review):
+      finishVarianceDays            = Current Finish vs this activity's own
+                                       embedded bFinish (P6's assigned-
+                                       primary-baseline snapshot field,
+                                       target_end_date — present in every
+                                       export regardless of whether a
+                                       ScheduleIQ baseline VERSION is
+                                       designated). UI label: "Embedded P6
+                                       Baseline Finish Variance".
+      approvedBaselineVarianceDays  = Current Finish vs the DESIGNATED
+                                       Approved/Revised Baseline VERSION's
+                                       own Finish date for this activity
+                                       (matched via `base`, same source as
+                                       `baselineFinish` below). Deliberately
+                                       independent of whether a PREVIOUS
+                                       update exists — PREVIOUS is only
+                                       needed for update-to-update movement
+                                       (updateMovementDays/finishMovement*
+                                       above), never for baseline variance.
+                                       None when no baseline version is
+                                       designated, or this activity has no
+                                       match in it. UI label: "Approved
+                                       Baseline Finish Variance".
 """
 
 from __future__ import annotations
@@ -319,6 +344,18 @@ def build_activity_analysis(
         finish_var = _variance(a.get('bFinish'), current_finish, cal)
         start_movement = _variance(prev_current_start, current_start, cal) if prev else {'calendarDays': None, 'workingDays': None, 'calendarConfident': cal is not None}
         finish_movement = _variance(prev_current_finish, current_finish, cal) if prev else {'calendarDays': None, 'workingDays': None, 'calendarConfident': cal is not None}
+        # Current Forecast Finish vs the DESIGNATED Approved/Revised Baseline
+        # VERSION's own Finish date (matched by Activity ID in `base`,
+        # same as `baselineFinish` below) — deliberately independent of
+        # `prev`/a previous update existing at all. This is a DIFFERENT
+        # comparison than `finish_var` above, which compares against this
+        # activity's own embedded bFinish (P6's assigned-primary-baseline
+        # snapshot field, target_end_date, present in every export
+        # regardless of whether a ScheduleIQ baseline version is
+        # designated) — the two must never be conflated or substituted for
+        # each other. None when no baseline version is designated, or this
+        # activity has no match in it — never approximated from finish_var.
+        approved_baseline_var = _variance(base.get('bFinish'), current_finish, cal) if base else {'calendarDays': None, 'workingDays': None, 'calendarConfident': cal is not None}
 
         # ── Float — imported P6 Total Float is source truth throughout ──
         baseline_tf = _num(base.get('totalFloat')) if base else None
@@ -412,6 +449,8 @@ def build_activity_analysis(
             'startMovementDays': start_movement['calendarDays'], 'startMovementWorkingDays': start_movement['workingDays'],
             'finishMovementDays': finish_movement['calendarDays'], 'finishMovementWorkingDays': finish_movement['workingDays'],
             'updateMovementDays': movement.get('finishMovementDays') if movement else None,
+            'approvedBaselineVarianceDays': approved_baseline_var['calendarDays'],
+            'approvedBaselineVarianceWorkingDays': approved_baseline_var['workingDays'],
             # Float
             'baselineTotalFloat': baseline_tf, 'previousTotalFloat': previous_tf, 'currentTotalFloat': current_tf,
             'importedCurrentTotalFloat': imported_current_tf,

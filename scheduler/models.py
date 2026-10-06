@@ -58,6 +58,14 @@ class Project(models.Model):
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Project Issue Register — a monotonically increasing counter, never
+    # derived from MAX(ProjectIssue.issue_number). Deriving it from the
+    # current MAX would let a deleted issue's number be reused by the next
+    # issue created (the Issue Register's explicit permanence guarantee:
+    # an Issue ID must never be reused, even after deletion). Read/
+    # incremented under select_for_update by the issue-creation view.
+    next_issue_number = models.PositiveIntegerField(default=1)
+
     class Meta:
         ordering = ['name']
 
@@ -846,6 +854,14 @@ class MitigationAction(models.Model):
     scenario = models.ForeignKey(
         RecoveryScenario, on_delete=models.SET_NULL, null=True, blank=True, related_name='mitigation_actions',
     )
+    # Project Issue Tracking — a mitigation action may instead (or also)
+    # respond to a human-logged ProjectIssue rather than a schedule-derived
+    # ScheduleRisk. Same nullable, SET_NULL pattern as `risk`/`scenario`
+    # above: reuses this existing action-tracking model rather than
+    # inventing a parallel "IssueAction" table.
+    issue = models.ForeignKey(
+        'ProjectIssue', on_delete=models.SET_NULL, null=True, blank=True, related_name='mitigation_actions',
+    )
 
     description = models.TextField()
     owner = models.CharField(max_length=200, blank=True)
@@ -864,6 +880,142 @@ class MitigationAction(models.Model):
 
     def __str__(self):
         return f'{self.description[:50]} ({self.status})'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Project Issue Tracking — a human-controlled Issue Register, deliberately
+# separate from ScheduleRisk (see that model's docstring above). The
+# distinction that governs this whole feature:
+#
+#   RISK  = an uncertain FUTURE event, derived fresh from the schedule
+#           engines every request (ScheduleRisk stores only workflow state
+#           on top of that — see risk_register.py).
+#   ISSUE = a condition or event that has ALREADY occurred or currently
+#           exists, entered and owned by a human (PM/Scheduler) — title,
+#           description, category, severity, required action, etc. are
+#           all genuine persisted fields here, unlike ScheduleRisk which
+#           deliberately carries none of those (its evidence is always
+#           recomputed, never stored).
+#
+# ScheduleIQ NEVER creates an Issue automatically from schedule conditions
+# (e.g. negative float does not spawn an Issue) — every row here is a
+# deliberate human entry. Schedule EXPOSURE for an issue's linked
+# activities (float, criticality, milestone reachability) is computed
+# fresh at request time by issue_register.py, exactly the same discipline
+# ScheduleRisk uses, and is kept strictly separate from the human-set
+# `severity` field below — a Critical-severity issue and a float-negative
+# linked activity are two independent facts, never conflated.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ISSUE_CATEGORY_CHOICES = [
+    ('ENGINEERING',          'Engineering'),
+    ('PROCUREMENT',          'Procurement'),
+    ('CONSTRUCTION',         'Construction'),
+    ('PREFABRICATION',       'Prefabrication'),
+    ('EQUIPMENT_DELIVERY',   'Equipment Delivery'),
+    ('QA_QC',                'QA/QC'),
+    ('COMMISSIONING',        'Commissioning'),
+    ('PRODUCTIVITY',         'Productivity'),
+    ('MANPOWER',             'Manpower'),
+    ('DESIGN_COORDINATION',  'Design/Coordination'),
+    ('OWNER_GC',             'Owner/GC'),
+    ('OTHER',                'Other'),
+]
+
+ISSUE_STATUS_CHOICES = [
+    ('OPEN',        'Open'),
+    ('MONITORING',  'Monitoring'),
+    ('MITIGATING',  'Mitigating'),
+    ('RESOLVED',    'Resolved'),
+    ('CLOSED',      'Closed'),
+]
+
+# Statuses that still represent an ACTIVE issue for summary-card counts
+# (Open/Critical/High/Overdue) and Field Dashboard prioritization —
+# Resolved/Closed are kept in the register for history but excluded from
+# "currently active" counts.
+ISSUE_ACTIVE_STATUSES = ('OPEN', 'MONITORING', 'MITIGATING')
+
+ISSUE_SEVERITY_CHOICES = [
+    ('LOW',       'Low'),
+    ('MEDIUM',    'Medium'),
+    ('HIGH',      'High'),
+    ('CRITICAL',  'Critical'),
+]
+
+
+class ProjectIssue(models.Model):
+    """A human-logged Project Issue — see the module-level comment above
+    for the Risk-vs-Issue distinction this model exists to preserve. Every
+    field here is a deliberate PM/Scheduler entry; nothing is inferred
+    from schedule conditions. `linked_activity_ids` and `linked_milestone`
+    are the only connection to the live schedule, and even those are never
+    required — an issue not yet linked to anything is still a valid row."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='issues')
+    # Human-readable, per-project sequential reference ("ISS-0007") —
+    # distinct from the UUID primary key, which is never shown to a user.
+    issue_number = models.PositiveIntegerField()
+
+    title = models.CharField(max_length=300)
+    description = models.TextField(blank=True)
+    category = models.CharField(max_length=30, choices=ISSUE_CATEGORY_CHOICES, default='OTHER')
+    status = models.CharField(max_length=20, choices=ISSUE_STATUS_CHOICES, default='OPEN')
+    severity = models.CharField(max_length=20, choices=ISSUE_SEVERITY_CHOICES, default='MEDIUM')
+
+    date_identified = models.DateField(default=timezone.localdate)
+    owner = models.CharField(max_length=200, blank=True)
+    required_action = models.TextField(blank=True)
+    target_resolution_date = models.DateField(null=True, blank=True)
+    actual_resolution_date = models.DateField(null=True, blank=True)
+
+    # Indicators only — never computed from the schedule, always a human
+    # judgment call distinct from the fresh schedule-exposure computation
+    # issue_register.py performs for any linked activities.
+    schedule_impact = models.BooleanField(default=False)
+    cost_impact = models.BooleanField(default=False)
+
+    # Free text — there is no persisted WBS/Area model anywhere in
+    # ScheduleIQ (WBS/area only ever exist inside a version's own
+    # activities_json), so this mirrors how every other project-level
+    # record (e.g. cost entries) already handles "affected area."
+    affected_area = models.CharField(max_length=300, blank=True)
+
+    # One or more Activity Codes from the CURRENT schedule, at the time
+    # they were linked — never validated against a specific ScheduleUpload
+    # (an issue must survive re-imports), so a linked id can legitimately
+    # stop resolving after a later import; see issue_register.py for the
+    # "Linked activity not found in selected schedule version" handling.
+    linked_activity_ids = models.JSONField(default=list, blank=True)
+    linked_milestone = models.ForeignKey(
+        MilestoneDefinition, on_delete=models.SET_NULL, null=True, blank=True, related_name='linked_issues',
+    )
+
+    source_reference = models.CharField(max_length=300, blank=True)
+    notes = models.TextField(blank=True)
+
+    # Authenticated identities only (Phase 3: Authentication and
+    # Authorization) — never a caller-supplied body field. Blank only for
+    # rows that predate a real session on this install.
+    created_by = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_by = models.CharField(max_length=200, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = [('project', 'issue_number')]
+        indexes = [
+            models.Index(fields=['project', 'status']),
+            models.Index(fields=['project', 'severity']),
+        ]
+
+    def __str__(self):
+        # Matches the API's own reference format exactly (views.py's
+        # _serialize_project_issue) — derived from issue_number, never a
+        # second stored value to keep in sync.
+        return f'ISS-{self.issue_number:04d} — {self.title} ({self.project.name})'
 
 
 AUDIT_OUTCOME_CHOICES = [

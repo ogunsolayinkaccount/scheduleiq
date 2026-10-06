@@ -388,13 +388,37 @@ function IntegrationSourcesPanel({ sources }: { sources: any }) {
   );
 }
 
-function ProjectIssuesPanel({ issues }: { issues: any }) {
+const ISSUE_SEV_COLOR: Record<string, string> = { CRITICAL: C.red, HIGH: C.orange, MEDIUM: C.amber, LOW: C.muted2 };
+
+function ProjectIssuesPanel({ issues, onOpenIssueRegister }: { issues: any; onOpenIssueRegister?: () => void }) {
   return (
-    <Panel title="Project Issues">
-      {!issues?.configured || !issues?.issues?.length ? <Unavailable reason={issues?.reason || "No issues configured."} /> : (
-        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: C.text }}>
-          {issues.issues.map((it: any, i: number) => <li key={i}>{it.title || it}</li>)}
-        </ul>
+    <Panel title="Project Issues" action={onOpenIssueRegister && (
+      <button onClick={onOpenIssueRegister} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.accent, borderRadius: 6, padding: "5px 11px", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>
+        View Project Issues
+      </button>
+    )}>
+      {!issues?.available ? <Unavailable reason={issues?.reason} /> : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(90px,1fr))", gap: 8, marginBottom: 12 }}>
+            <KpiCard label="Open" value={issues.openCount} color={issues.openCount > 0 ? C.red : C.green} />
+            <KpiCard label="Critical" value={issues.criticalCount} color={issues.criticalCount > 0 ? C.red : C.green} />
+            <KpiCard label="High" value={issues.highCount} color={issues.highCount > 0 ? C.orange : C.green} />
+            <KpiCard label="Overdue" value={issues.overdueCount} color={issues.overdueCount > 0 ? C.amber : C.green} />
+          </div>
+          {!issues.topIssues?.length ? (
+            <div style={{ color: C.muted2, fontSize: 12 }}>No active issues recorded for this project.</div>
+          ) : (
+            <ul style={{ margin: 0, paddingLeft: 0, listStyle: "none", fontSize: 12 }}>
+              {issues.topIssues.map((it: any) => (
+                <li key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderTop: `1px solid ${C.border}` }}>
+                  <span style={{ background: `${ISSUE_SEV_COLOR[it.severity]}18`, color: ISSUE_SEV_COLOR[it.severity], borderRadius: 5, padding: "2px 7px", fontSize: 10, fontWeight: 700 }}>{it.severity}</span>
+                  <span style={{ color: C.text, fontWeight: 600, flex: 1 }}>{it.title}</span>
+                  {it.overdue && <span style={{ color: C.red, fontSize: 10, fontWeight: 700 }}>OVERDUE</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </Panel>
   );
@@ -402,8 +426,8 @@ function ProjectIssuesPanel({ issues }: { issues: any }) {
 
 // ─── root ───────────────────────────────────────────────────────────────
 
-export default function FieldDashboard({ initialProjectId, initialVersionId }: {
-  initialProjectId?: string; initialVersionId?: string;
+export default function FieldDashboard({ initialProjectId, initialVersionId, onOpenIssueRegister }: {
+  initialProjectId?: string; initialVersionId?: string; onOpenIssueRegister?: (projectId: string, versionId?: string) => void;
 } = {}) {
   const ctx = useProjectsAndVersions(initialProjectId, initialVersionId);
   const [warningThresholdDays, setWarningThresholdDays] = useState(10);
@@ -473,7 +497,7 @@ export default function FieldDashboard({ initialProjectId, initialVersionId }: {
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
             <IntegrationSourcesPanel sources={data.integrationSources} />
-            <ProjectIssuesPanel issues={data.projectIssues} />
+            <ProjectIssuesPanel issues={data.projectIssues} onOpenIssueRegister={onOpenIssueRegister ? () => onOpenIssueRegister(ctx.projectId, ctx.versionId) : undefined} />
           </div>
         </>
       )}

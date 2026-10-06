@@ -11,7 +11,7 @@ from django.test import TestCase
 from scheduler import project_consolidation as pc
 from scheduler.models import (
     ContractualMilestoneRevision, MilestoneDefinition, MitigationAction, Project, ProjectControlsReport,
-    RecoveryScenario, ScheduleRisk, ScheduleUpload,
+    ProjectIssue, RecoveryScenario, ScheduleRisk, ScheduleUpload,
 )
 from .fixtures import make_activity
 from .test_project_consolidation import _Base, acts, version
@@ -73,6 +73,20 @@ class ApplyRefusalTests(ApplyBase):
         self.assertEqual(self.post(payload).status_code, 409)
         self.assertEqual(self.counts(), before)
 
+    def test_refuses_on_unresolved_issue_number_merge_conflict(self):
+        # Final pre-commit review, item 13/2: consolidation must never
+        # silently duplicate an Issue ID — the SAME issue_number on two
+        # merging projects must block the whole apply, exactly like a
+        # risk_key conflict already does above.
+        ProjectIssue.objects.create(project=self.pa, issue_number=1, title='In Jan project')
+        ProjectIssue.objects.create(project=self.pb, issue_number=1, title='In Feb project')
+        _, payload = self.approve(self.files(self.jan, self.feb, self.mar))
+        before = self.counts()
+        before_issue_count = ProjectIssue.objects.count()
+        self.assertEqual(self.post(payload).status_code, 409)
+        self.assertEqual(self.counts(), before)
+        self.assertEqual(ProjectIssue.objects.count(), before_issue_count)  # nothing merged, nothing lost, nothing duplicated
+
     def test_dry_run_endpoints_never_apply(self):
         before = self.snapshot()
         self.client.post('/api/projects/consolidation-plan/', data=json.dumps({'nameContains': 'barn', 'confirmation': 'CONSOLIDATE', 'apply': True}),
@@ -101,6 +115,15 @@ class ApplyExecutionTests(ApplyBase):
         self.revision = ContractualMilestoneRevision.objects.create(
             milestone=self.milestone, previous_date=date(2026, 11, 1), new_date=date(2026, 12, 15), reason='owner-approved',
         )
+        # Project Issue Register — project-scoped (no schedule_upload FK at
+        # all, by design), so it must follow the same project-level
+        # REPOINT path as MitigationAction/MilestoneDefinition above, and
+        # its linked MitigationAction must survive the move with the FK
+        # relationship intact.
+        self.issue = ProjectIssue.objects.create(
+            project=self.pa, issue_number=5, title='Area B conduit delay', linked_activity_ids=['A1'],
+        )
+        self.issue_action = MitigationAction.objects.create(project=self.pa, issue=self.issue, description='Expedite conduit')
 
     def apply(self):
         plan, payload = self.approve(self.files_)
@@ -150,6 +173,19 @@ class ApplyExecutionTests(ApplyBase):
         # own history is altered by the move.
         self.revision.refresh_from_db()
         self.assertEqual(self.revision.previous_date, date(2026, 11, 1))
+
+    def test_project_issue_and_its_mitigation_action_move_to_canonical(self):
+        plan, _ = self.apply()
+        canon_id = next(l for l in plan['lineages'] if len(l['versions']) > 1)['canonicalProject']['projectId']
+        self.issue.refresh_from_db()
+        self.issue_action.refresh_from_db()
+        self.assertEqual(str(self.issue.project_id), canon_id)
+        self.assertEqual(self.issue.issue_number, 5)              # Issue ID is permanent — unchanged by the move
+        self.assertEqual(self.issue.title, 'Area B conduit delay')  # nothing about the record itself is altered
+        self.assertEqual(self.issue.linked_activity_ids, ['A1'])    # activity references are untouched, never remapped
+        self.assertEqual(str(self.issue_action.project_id), canon_id)
+        self.assertEqual(self.issue_action.issue_id, self.issue.id)  # the FK relationship survives the move intact
+        self.assertEqual(ProjectIssue.objects.filter(pk=self.issue.pk).count(), 1)  # not duplicated
         self.assertEqual(self.revision.new_date, date(2026, 12, 15))
         self.assertEqual(self.revision.reason, 'owner-approved')
         self.assertEqual(ContractualMilestoneRevision.objects.filter(milestone__project_id=canon_id).count(), 1)

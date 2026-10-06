@@ -259,14 +259,19 @@ class FieldDashboardSummaryApiTests(TestCase):
         self.assertEqual(sources['fieldData']['status'], 'NOT_CONNECTED')
 
     def test_project_issues_not_fabricated(self):
+        # Project Issue Tracking is now a real, always-on engine (see
+        # issue_register.py) — but with no ProjectIssue rows created for
+        # this project, it must report real zero counts, never an invented
+        # example issue.
         ScheduleUpload.objects.create(
             project=self.project, original_filename='v.xer', sanitized_filename='v.xer',
             file_type='XER', data_date='2026-01-05', activities_json=[_act('A1')],
         )
         resp = self.client.get(f'/api/projects/{self.project.id}/field-dashboard-summary/')
         issues = resp.json()['projectIssues']
-        self.assertFalse(issues['configured'])
-        self.assertEqual(issues['issues'], [])
+        self.assertTrue(issues['configured'])
+        self.assertEqual(issues['topIssues'], [])
+        self.assertEqual(issues['openCount'], 0)
 
     def test_financials_reconcile_with_cost_summary_endpoint(self):
         acts = [_act('A1', isCostLoaded=True, budgetedCost=100000.0, actualCost=40000.0, pctComplete=50.0)]

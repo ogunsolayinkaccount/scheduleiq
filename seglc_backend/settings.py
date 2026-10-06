@@ -37,6 +37,25 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "True") == "True"
 
 ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 
+# Phase 3 (Authentication and Authorization) follow-up fix — Django's
+# CsrfViewMiddleware rejects any unsafe request that carries an Origin
+# header not matching request.get_host() (see
+# django.middleware.csrf.CsrfViewMiddleware._origin_verified — this check
+# is unconditional, not just for HTTPS). The Vite dev server (frontend/
+# vite.config.ts, port 5170) proxies /api to this backend (port 8001) with
+# changeOrigin:true, which rewrites the Host header the backend sees to
+# match ITS OWN port — but the browser's real Origin header still reads
+# the page's actual origin (localhost:5170), so the two never match and
+# every authenticated mutating request (POST/PATCH/DELETE) gets rejected
+# with "Origin checking failed", regardless of role or CSRF token
+# correctness. This is NOT a weakening of CSRF protection — it is Django's
+# own documented mechanism for exactly this situation (a legitimate
+# frontend origin that differs from the backend's own), scoped to named
+# origins only. Configurable the same way ALLOWED_HOSTS already is, so a
+# real deployment sets its own real origin(s) via the env var instead of
+# relying on this dev-only default.
+CSRF_TRUSTED_ORIGINS = os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "http://localhost:5170").split(",")
+
 # ── Applications ──────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
     "django.contrib.admin",

@@ -93,6 +93,8 @@ EXPECTED_ROLES = {
     'project_risk_driving_chain': {'default': V},
     'project_mitigation_actions': {'default': V, 'POST': S},
     'project_mitigation_action_detail': {'default': V, 'PATCH': S, 'DELETE': S},
+    'project_issues': {'default': V, 'POST': S},
+    'project_issue_detail': {'default': V, 'PATCH': S, 'DELETE': S},
     'project_contractual_milestones': {'default': V, 'POST': S},
     'project_contractual_milestone_detail': {'default': V, 'PATCH': S, 'DELETE': S},
     'project_contractual_milestone_revisions': {'default': V},
