@@ -6575,7 +6575,7 @@ function AppShell(){
             onOpenUpdateAnalysis={handleDashboardOpenUpdateAnalysis} onOpenRiskMilestones={handleDashboardOpenRiskMilestones}
             onOpenProjectControls={handleDashboardOpenProjectControls} onOpenBaselineProgress={handleDashboardOpenBaselineProgress}
             onOpenIntelligence={handleDashboardOpenIntelligence}/>}
-          {view==="fieldDashboard"                 &&<FieldDashboard initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} onOpenIssueRegister={handleOpenIssueRegister}/>}
+          {view==="fieldDashboard"                 &&<FieldDashboard initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} onOpenIssueRegister={handleOpenIssueRegister} onOpenVarianceIntelligence={handleOpenVarianceIntelligence} onOpenFloatAnalysis={handleDashboardOpenFloatAnalysis}/>}
           {M&&!metricsLoading&&view==="portfolio"  &&<PortfolioView M={M} files={files} selectedIds={selectedIds} allActivities={phasedActivities} onGoToFilter={handleGoToFilter} onGoToProject={handleGoToProject}/>}
           {M&&!metricsLoading&&view==="scurve"     &&<SCurveView M={M} allActivities={phasedActivities} files={files} selectedIds={selectedIds}/>}
           {M&&!metricsLoading&&view==="gantt"      &&<GanttView allActivities={phasedActivities} dataDate={dataDate} onGoToActivity={()=>setView("critical")}/>}

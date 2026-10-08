@@ -5,6 +5,7 @@ import {
   ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { formatDataDate, versionSelectLabel, dedupeVersionsById } from "./dateFormat";
+import { resolveCompletionStatus, isRegisteredCompletion, completionPanelTitle, buildVarianceIntelligenceUrl } from "./fieldDashboardVarianceFormat";
 
 const C = {
   bg: "#f5f2ec", panel: "#ede9df", card: "#ffffff", card2: "#f0ece4",
@@ -19,6 +20,28 @@ const CATEGORY_OPTIONS = [
   { value: "CONTRACTUAL_COMPLETION", label: "Contractual Completion" },
   { value: "CONTRACTUAL_INTERIM", label: "Contractual Interim Milestone" },
 ];
+
+// ─── Schedule Variance & Completion (reuses /variance-intelligence/ verbatim —
+// see VarianceIntelligence.tsx for the authoritative engine; nothing below
+// recalculates a date, Total Float, variance, or exposure tier) ───────────
+const ASSESSMENT_COLOR: Record<string, string> = {
+  HIGH_EXPOSURE: C.red, WARNING: C.orange, MONITOR: C.amber, FAVORABLE: C.green, UNAVAILABLE: C.muted2,
+};
+const ASSESSMENT_LABEL: Record<string, string> = {
+  HIGH_EXPOSURE: "High Exposure", WARNING: "Warning", MONITOR: "Monitor", FAVORABLE: "Favorable", UNAVAILABLE: "Unavailable",
+};
+const DIRECTION_COLOR: Record<string, string> = {
+  FAVORABLE: C.green, UNFAVORABLE: C.red, NO_MOVEMENT: C.muted2, UNAVAILABLE: C.muted2,
+};
+function AssessmentBadge({ assessment }: { assessment: string }) {
+  const color = ASSESSMENT_COLOR[assessment] || C.muted2;
+  return <span style={{ background: `${color}18`, color, borderRadius: 5, padding: "2px 8px", fontSize: 10, fontWeight: 700, whiteSpace: "nowrap" }}>{ASSESSMENT_LABEL[assessment] || assessment}</span>;
+}
+function fmtVarDays(days: number | null | undefined): string {
+  if (days == null) return "Unavailable";
+  const sign = days > 0 ? "+" : "";
+  return `${sign}${days}d`;
+}
 
 function useProjectsAndVersions(initialProjectId?: string, initialVersionId?: string) {
   const [projects, setProjects] = useState<any[]>([]);
@@ -77,6 +100,26 @@ function useFieldDashboardSummary(ctx: ReturnType<typeof useProjectsAndVersions>
   return { data, loading, error, reload: load };
 }
 
+// Fetches the SAME /variance-intelligence/ endpoint Variance Intelligence
+// itself calls, with no basis param — the backend resolves the identical
+// default (approvedBaseline if designated, else embeddedBaseline) so both
+// screens always agree without the Field Dashboard choosing a basis itself.
+function useVarianceIntelligenceSummary(ctx: ReturnType<typeof useProjectsAndVersions>) {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!ctx.projectId || !ctx.versionId) { setData(null); return; }
+    setLoading(true); setError(null);
+    sfetch(`${API}${buildVarianceIntelligenceUrl(ctx.projectId, ctx.versionId)}`)
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t); return JSON.parse(t); })
+      .then(setData).catch((e: any) => setError(e.message || String(e))).finally(() => setLoading(false));
+  }, [ctx.projectId, ctx.versionId]);
+
+  return { data, loading, error };
+}
+
 function Select({ value, onChange, options, placeholder }: any) {
   return (
     <select value={value} onChange={e => onChange(e.target.value)}
@@ -103,9 +146,9 @@ function Unavailable({ reason }: { reason?: string | null }) {
   return <div style={{ color: C.muted2, fontSize: 12, padding: "14px 4px" }}>{reason || "Unavailable"}</div>;
 }
 
-function KpiCard({ label, value, sub, color }: { label: string; value: React.ReactNode; sub?: string; color?: string }) {
+function KpiCard({ label, value, sub, color, onClick }: { label: string; value: React.ReactNode; sub?: string; color?: string; onClick?: () => void }) {
   return (
-    <div style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 9, padding: "10px 12px", minWidth: 0 }}>
+    <div onClick={onClick} style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 9, padding: "10px 12px", minWidth: 0, cursor: onClick ? "pointer" : "default" }}>
       <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 800, color: color || C.text }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: C.muted2, marginTop: 2 }}>{sub}</div>}
@@ -424,14 +467,116 @@ function ProjectIssuesPanel({ issues, onOpenIssueRegister }: { issues: any; onOp
   );
 }
 
+function CompletionStatusBadge({ cm }: { cm: any }) {
+  const status = resolveCompletionStatus(cm);
+  if (status.kind === "direction") {
+    return <span style={{ background: `${C.muted2}18`, color: C.muted2, borderRadius: 5, padding: "2px 8px", fontSize: 10, fontWeight: 700 }}>{status.label}</span>;
+  }
+  return <AssessmentBadge assessment={status.value} />;
+}
+
+function VarianceCompletionPanel({ vi, loading, error, projectId, versionId, onOpenVarianceIntelligence, onOpenFloatAnalysis }: {
+  vi: any; loading: boolean; error: string | null; projectId: string; versionId: string;
+  onOpenVarianceIntelligence?: (projectId: string, versionId?: string, assessmentFilter?: string) => void;
+  onOpenFloatAnalysis?: (projectId: string, versionId: string, filter?: "negative" | "zero" | "nearCritical") => void;
+}) {
+  const action = onOpenVarianceIntelligence && (
+    <button onClick={() => onOpenVarianceIntelligence(projectId, versionId)} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.accent, borderRadius: 6, padding: "5px 11px", cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit" }}>
+      View Full Variance Intelligence →
+    </button>
+  );
+
+  if (loading && !vi) return <Panel title="Schedule Variance & Completion" action={action}><div style={{ color: C.accent, fontSize: 12, padding: "6px 4px" }}>Loading…</div></Panel>;
+  if (error) return <Panel title="Schedule Variance & Completion" action={action}><Unavailable reason={error} /></Panel>;
+  if (!vi || !vi.available) return <Panel title="Schedule Variance & Completion" action={action}><Unavailable reason={vi?.reason} /></Panel>;
+
+  const s = vi.summary;
+  const cm = vi.completionMilestone;
+  const completionIsRegistered = isRegisteredCompletion(cm?.selectionBasis);
+
+  return (
+    <Panel title="Schedule Variance & Completion" action={action}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+        Comparison basis: <strong style={{ color: C.text }}>{vi.basisLabel}</strong> — sourced directly from ScheduleIQ's Variance Intelligence engine; nothing on this panel is independently recalculated.
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8, marginBottom: 8 }}>
+        <KpiCard label="Current Finish" value={s?.currentProjectFinish ? formatDataDate(s.currentProjectFinish) : "Unavailable"}
+          sub={completionIsRegistered ? "Registered completion milestone" : "Latest milestone — not registered as completion"} />
+        <KpiCard label="Finish Variance" value={fmtVarDays(s?.projectFinishVarianceDays)} color={s?.projectFinishVarianceDays > 0 ? C.red : s?.projectFinishVarianceDays < 0 ? C.green : undefined} />
+        <KpiCard label="Total Float" value={s?.projectFinishTotalFloat ?? "Unavailable"} />
+        <KpiCard label="Comparison" value={vi.basisLabel} sub={s?.comparisonProjectFinish ? `Finish: ${formatDataDate(s.comparisonProjectFinish)}` : "Unavailable"} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8, marginBottom: 8 }}>
+        <KpiCard label="Negative Float" value={s?.negativeFloatCount} color={s?.negativeFloatCount > 0 ? C.red : undefined}
+          onClick={onOpenFloatAnalysis ? () => onOpenFloatAnalysis(projectId, versionId, "negative") : undefined} />
+        <KpiCard label="Zero Float" value={s?.zeroFloatCount}
+          onClick={onOpenFloatAnalysis ? () => onOpenFloatAnalysis(projectId, versionId, "zero") : undefined} />
+        <KpiCard label="Near-Critical" value={s?.nearCriticalCount} color={C.amber}
+          onClick={onOpenFloatAnalysis ? () => onOpenFloatAnalysis(projectId, versionId, "nearCritical") : undefined} />
+        <KpiCard label="Driving" value={s?.drivingCount} color={C.purple} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8, marginBottom: 14 }}>
+        <KpiCard label="Behind Comparison" value={s?.milestonesBehindComparison} color={s?.milestonesBehindComparison > 0 ? C.red : undefined} />
+        <KpiCard label="Ahead of Comparison" value={s?.milestonesAheadOfComparison} color={C.green} />
+        <KpiCard label="High Exposure" value={s?.highExposureCount} color={C.red}
+          onClick={onOpenVarianceIntelligence ? () => onOpenVarianceIntelligence(projectId, versionId, "HIGH_EXPOSURE") : undefined} />
+        <KpiCard label="Warning" value={s?.warningCount} color={C.orange}
+          onClick={onOpenVarianceIntelligence ? () => onOpenVarianceIntelligence(projectId, versionId, "WARNING") : undefined} />
+      </div>
+
+      <div style={{ fontSize: 12, fontWeight: 800, color: C.text, marginBottom: 2 }}>
+        {completionPanelTitle(cm?.selectionBasis)}
+      </div>
+      {!completionIsRegistered && cm && (
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+          No milestone is registered in ScheduleIQ as the Contractual Completion milestone for this project — this is the latest-finishing milestone activity, shown for reference only. It is NOT confirmed as the project's completion milestone.
+        </div>
+      )}
+      {!cm ? (
+        <div style={{ color: C.muted2, fontSize: 12, marginTop: 6 }}>{vi.completionInterpretation}</div>
+      ) : (
+        <>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10, textTransform: "uppercase" }}>
+              <th style={{ padding: "4px 6px" }}>Milestone</th>
+              <th style={{ padding: "4px 6px" }}>Current Finish</th>
+              <th style={{ padding: "4px 6px" }}>Comparison Finish</th>
+              <th style={{ padding: "4px 6px", textAlign: "right" }}>Finish Variance</th>
+              <th style={{ padding: "4px 6px", textAlign: "right" }}>Total Float</th>
+              <th style={{ padding: "4px 6px" }}>Driving</th>
+              <th style={{ padding: "4px 6px" }}>Status</th>
+            </tr></thead>
+            <tbody>
+              <tr style={{ borderTop: `1px solid ${C.border}` }}>
+                <td style={{ padding: "6px", color: C.text, fontWeight: 600 }}>{cm.activityId} — {cm.activityName}</td>
+                <td style={{ padding: "6px", color: C.text }}>{cm.currentFinish ? formatDataDate(cm.currentFinish) : "Unavailable"}</td>
+                <td style={{ padding: "6px", color: C.text }}>{cm.comparisonFinish ? formatDataDate(cm.comparisonFinish) : "Unavailable"}</td>
+                <td style={{ padding: "6px", textAlign: "right", color: DIRECTION_COLOR[cm.direction], fontWeight: 700 }}>{fmtVarDays(cm.finishVarianceDays)}</td>
+                <td style={{ padding: "6px", textAlign: "right", color: C.text }}>{cm.currentTotalFloat ?? "Unavailable"}</td>
+                <td style={{ padding: "6px", color: C.text }}>{cm.driving ? "Yes" : "No"}</td>
+                <td style={{ padding: "6px" }}><CompletionStatusBadge cm={cm} /></td>
+              </tr>
+            </tbody>
+          </table>
+          <div style={{ fontSize: 12, color: C.text, background: C.panel, borderRadius: 8, padding: 10, marginTop: 10 }}>{vi.completionInterpretation}</div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
 // ─── root ───────────────────────────────────────────────────────────────
 
-export default function FieldDashboard({ initialProjectId, initialVersionId, onOpenIssueRegister }: {
+export default function FieldDashboard({ initialProjectId, initialVersionId, onOpenIssueRegister, onOpenVarianceIntelligence, onOpenFloatAnalysis }: {
   initialProjectId?: string; initialVersionId?: string; onOpenIssueRegister?: (projectId: string, versionId?: string) => void;
+  onOpenVarianceIntelligence?: (projectId: string, versionId?: string, assessmentFilter?: string) => void;
+  onOpenFloatAnalysis?: (projectId: string, versionId: string, filter?: "negative" | "zero" | "nearCritical") => void;
 } = {}) {
   const ctx = useProjectsAndVersions(initialProjectId, initialVersionId);
   const [warningThresholdDays, setWarningThresholdDays] = useState(10);
   const { data, loading, error, reload } = useFieldDashboardSummary(ctx, warningThresholdDays);
+  const vi = useVarianceIntelligenceSummary(ctx);
 
   return (
     <div>
@@ -471,6 +616,9 @@ export default function FieldDashboard({ initialProjectId, initialVersionId, onO
 
       {data && !loading && (
         <>
+          <VarianceCompletionPanel vi={vi.data} loading={vi.loading} error={vi.error} projectId={ctx.projectId} versionId={ctx.versionId}
+            onOpenVarianceIntelligence={onOpenVarianceIntelligence} onOpenFloatAnalysis={onOpenFloatAnalysis} />
+
           <ContractualMilestoneTracker projectId={ctx.projectId} panel={data.contractualMilestones}
             warningThresholdDays={warningThresholdDays} onThresholdChange={setWarningThresholdDays} onChanged={reload} />
 

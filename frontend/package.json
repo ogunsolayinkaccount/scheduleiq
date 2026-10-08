@@ -11,7 +11,8 @@
     "test:activityNav": "tsc activityNavigation.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/activityNavigation.test.mjs",
     "test:dashboard": "tsc dashboardFormat.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/dashboardFormat.test.mjs",
     "test:importProtection": "tsc importProtection.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/importProtection.test.mjs",
-    "test:auth": "tsc auth.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/auth.test.mjs"
+    "test:auth": "tsc auth.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/auth.test.mjs",
+    "test:fieldDashboardVariance": "tsc fieldDashboardVarianceFormat.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/fieldDashboardVarianceFormat.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
