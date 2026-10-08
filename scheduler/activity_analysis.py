@@ -356,6 +356,12 @@ def build_activity_analysis(
         # each other. None when no baseline version is designated, or this
         # activity has no match in it — never approximated from finish_var.
         approved_baseline_var = _variance(base.get('bFinish'), current_finish, cal) if base else {'calendarDays': None, 'workingDays': None, 'calendarConfident': cal is not None}
+        # Same comparison, Start side — symmetric with approved_baseline_var
+        # above, for Variance Intelligence's comparison-basis selector
+        # (Current vs Approved Baseline needs both Start and Finish sides,
+        # same as the embedded/previous bases already have via start_var/
+        # start_movement). No new date math: same _variance() helper.
+        approved_baseline_start_var = _variance(base.get('bStart'), current_start, cal) if base else {'calendarDays': None, 'workingDays': None, 'calendarConfident': cal is not None}
 
         # ── Float — imported P6 Total Float is source truth throughout ──
         baseline_tf = _num(base.get('totalFloat')) if base else None
@@ -435,6 +441,18 @@ def build_activity_analysis(
             # Dates
             'baselineStart': a.get('bStart') if not base else base.get('bStart'),
             'baselineFinish': a.get('bFinish') if not base else base.get('bFinish'),
+            # Variance Intelligence's three comparison bases, each exposed
+            # as its own {comparisonStart, comparisonFinish} pair — no
+            # fallback between them (unlike baselineStart/baselineFinish
+            # above, which intentionally falls back to the embedded field
+            # when no baseline is designated). approvedBaseline*/
+            # embeddedBaseline*/previous* are None, independently, exactly
+            # when that specific comparison genuinely isn't available —
+            # never substituted for one another.
+            'approvedBaselineStart': base.get('bStart') if base else None,
+            'approvedBaselineFinish': base.get('bFinish') if base else None,
+            'embeddedBaselineStart': a.get('bStart'), 'embeddedBaselineFinish': a.get('bFinish'),
+            'previousStart': prev_current_start, 'previousFinish': prev_current_finish,
             'currentStart': current_start, 'currentFinish': current_finish,
             'forecastStart': forecast_start, 'forecastFinish': forecast_finish,
             'earlyStart': a.get('earlyStart'), 'earlyFinish': a.get('earlyFinish'),
@@ -451,6 +469,8 @@ def build_activity_analysis(
             'updateMovementDays': movement.get('finishMovementDays') if movement else None,
             'approvedBaselineVarianceDays': approved_baseline_var['calendarDays'],
             'approvedBaselineVarianceWorkingDays': approved_baseline_var['workingDays'],
+            'approvedBaselineStartVarianceDays': approved_baseline_start_var['calendarDays'],
+            'approvedBaselineStartVarianceWorkingDays': approved_baseline_start_var['workingDays'],
             # Float
             'baselineTotalFloat': baseline_tf, 'previousTotalFloat': previous_tf, 'currentTotalFloat': current_tf,
             'importedCurrentTotalFloat': imported_current_tf,

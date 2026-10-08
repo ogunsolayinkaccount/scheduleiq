@@ -65,6 +65,7 @@ from . import update_intelligence
 from . import schedule_identity
 from . import contractual_milestones
 from . import issue_register
+from . import variance_intelligence
 
 
 def serialize_date(value):
@@ -5921,6 +5922,184 @@ def project_float_analysis(request, pk):
         'previousVersionId': str(ctx['previous'].id) if ctx['previous'] else None,
         'previousVersionLabel': (ctx['previous'].version_label or ctx['previous'].original_filename) if ctx['previous'] else None,
         'previousUnresolved': getattr(ctx['current'], '_previous_unresolved', None),
+        'baselineVersionId': str(ctx['baseline'].id) if ctx['baseline'] else None,
+        'baselineVersionLabel': (ctx['baseline'].version_label or ctx['baseline'].original_filename) if ctx['baseline'] else None,
+        **result,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/projects/<id>/variance-intelligence/
+# ─────────────────────────────────────────────────────────────────────────────
+
+@require_role('VIEWER')
+@require_http_methods(['GET'])
+def project_variance_intelligence(request, pk):
+    """Variance Intelligence — scheduler-level interpretation layer over
+    activity_analysis.py's master rows (the SAME rows Activity Analysis
+    and Float Analysis already use). Calculates nothing new about dates,
+    float, or criticality; only selects a comparison basis, classifies
+    direction/exposure, ranks, and aggregates — see variance_intelligence.py.
+
+    Query params: currentVersion/version, previousVersion, baselineVersion
+    (same resolution convention as every other analysis endpoint), basis
+    (approvedBaseline|embeddedBaseline|previous — defaults to
+    approvedBaseline when a baseline is designated, else embeddedBaseline),
+    groupBy (area|wbs|discipline|contractor|system, default area), topN,
+    plus the shared _filter_analysis_rows params (wbs/area/discipline/
+    contractor/system/criticalOnly/negativeFloatOnly/zeroFloatOnly/
+    nearCriticalOnly/milestonesOnly) and variance-specific filters:
+    direction (FAVORABLE|UNFAVORABLE|NO_MOVEMENT), assessment (MONITOR|
+    WARNING|HIGH_EXPOSURE), drivingOnly."""
+    from .models import MilestoneDefinition, Project
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    ctx = _resolve_analysis_context(project, request)
+    if not ctx:
+        return error_response('No schedule version available for this project', status=404)
+
+    try:
+        analysis = activity_analysis.build_activity_analysis(
+            ctx['current'].activities_json,
+            previous_activities=ctx['previous'].activities_json if ctx['previous'] else None,
+            baseline_activities=ctx['baseline'].activities_json if ctx['baseline'] else None,
+            current_data_date=ctx['current_dd'], previous_data_date=ctx['previous_dd'],
+            calendars=ctx['calendars'], calendar_meta=ctx['calendar_meta'],
+            update_intelligence_result=ctx['ui_result'], milestone_report=ctx['milestone_report'],
+        )
+        rows = _filter_analysis_rows(analysis['rows'], request)
+
+        baseline_designated = bool(ctx['baseline'])
+        previous_available = bool(ctx['previous'])
+        bases = variance_intelligence.available_comparison_bases(baseline_designated, previous_available)
+        bases_by_key = {b['key']: b for b in bases}
+
+        requested_basis = request.GET.get('basis')
+        if requested_basis not in variance_intelligence.COMPARISON_BASES:
+            requested_basis = 'approvedBaseline' if baseline_designated else 'embeddedBaseline'
+        basis_info = bases_by_key[requested_basis]
+
+        result = {
+            'engineVersion': variance_intelligence.ENGINE_VERSION,
+            'basis': requested_basis, 'basisLabel': basis_info['label'], 'bases': bases,
+        }
+
+        if not basis_info['available']:
+            result['available'] = False
+            result['reason'] = basis_info['reason']
+            return JsonResponse({
+                'projectId': str(project.id),
+                'currentVersionId': str(ctx['current'].id), 'currentVersionLabel': ctx['current'].version_label or ctx['current'].original_filename,
+                'currentDataDate': ctx['current_dd'].isoformat() if ctx['current_dd'] else None,
+                'previousVersionId': str(ctx['previous'].id) if ctx['previous'] else None,
+                'previousVersionLabel': (ctx['previous'].version_label or ctx['previous'].original_filename) if ctx['previous'] else None,
+                'baselineVersionId': str(ctx['baseline'].id) if ctx['baseline'] else None,
+                'baselineVersionLabel': (ctx['baseline'].version_label or ctx['baseline'].original_filename) if ctx['baseline'] else None,
+                **result,
+            })
+
+        # Contractual milestone reachability — same engine issue_register.py
+        # and the Exposure Matrix already use, never a second BFS.
+        by_id, _pred_of, _succ_of = driving_chain.build_adjacency(ctx['current'].activities_json)
+        reach_map = driving_chain.compute_milestone_reachability_map(ctx['current'].activities_json)
+        contractual_ids = _contractual_milestone_activity_ids(project)
+
+        variance_rows = variance_intelligence.build_variance_rows(rows, requested_basis, contractual_ids, reach_map)
+
+        # Variance-specific filters — applied on top of the already-filtered
+        # (wbs/area/criticalOnly/etc.) rows, same additive-filter discipline
+        # as every other analysis endpoint.
+        direction_filter = request.GET.get('direction')
+        if direction_filter in ('FAVORABLE', 'UNFAVORABLE', 'NO_MOVEMENT', 'UNAVAILABLE'):
+            variance_rows = [r for r in variance_rows if r['direction'] == direction_filter]
+        assessment_filter = request.GET.get('assessment')
+        if assessment_filter in ('MONITOR', 'WARNING', 'HIGH_EXPOSURE', 'FAVORABLE', 'UNAVAILABLE'):
+            variance_rows = [r for r in variance_rows if r['assessment'] == assessment_filter]
+        if request.GET.get('drivingOnly') in ('true', '1', 'True'):
+            variance_rows = [r for r in variance_rows if r['driving']]
+
+        group_by = request.GET.get('groupBy', 'area')
+        top_n_param = request.GET.get('topN')
+        top_n = int(top_n_param) if top_n_param else None
+
+        # Contract Variance — contractual_milestones.py's own, already-
+        # computed result, reused verbatim; never recomputed here.
+        register_entries = [_serialize_contractual_milestone(m) for m in MilestoneDefinition.objects.filter(project=project)]
+        contractual_entries = [e for e in register_entries if e['isContractual']]
+        contractual_tracker_by_id = {}
+        if contractual_entries:
+            tracker = contractual_milestones.build_contractual_milestone_tracker(
+                contractual_entries, rows, contractual_milestones.DEFAULT_WARNING_THRESHOLD_DAYS, ctx['calendars'],
+            )
+            contractual_tracker_by_id = {m['activityId']: m for m in tracker['milestones'] if m.get('activityId')}
+
+        # A registered CONTRACTUAL_COMPLETION milestone (if any) is the only
+        # authoritative signal for "project completion" — a deliberate
+        # human designation, same precedence discipline as Approved
+        # Baseline. Never CONTRACTUAL_INTERIM (an interim milestone, not
+        # final completion). None when nothing is registered — the engine
+        # then falls back to its own honestly-labeled heuristic.
+        registered_completion = next((e for e in register_entries if e['category'] == 'CONTRACTUAL_COMPLETION'), None)
+        registered_completion_activity_id = registered_completion['activityId'] if registered_completion else None
+
+        completion_milestone = variance_intelligence.identify_completion_milestone(variance_rows, registered_completion_activity_id)
+        area_summary = variance_intelligence.aggregate_variance_by_group(variance_rows, group_by)
+        ranked = variance_intelligence.rank_variance_exposure(variance_rows, top_n)
+        milestone_variance = variance_intelligence.build_milestone_variance(variance_rows, contractual_tracker_by_id)
+        update_movement = variance_intelligence.build_update_movement_summary(rows) if ctx['previous'] else None
+        narrative = variance_intelligence.build_deterministic_narrative(completion_milestone, variance_rows, area_summary, basis_info['label'])
+
+        milestone_rows = [r for r in variance_rows if r['isMilestone']]
+        summary = {
+            'activitiesAnalyzed': len(variance_rows),
+            'unfavorableCount': sum(1 for r in variance_rows if r['direction'] == 'UNFAVORABLE'),
+            'favorableCount': sum(1 for r in variance_rows if r['direction'] == 'FAVORABLE'),
+            'noMovementCount': sum(1 for r in variance_rows if r['direction'] == 'NO_MOVEMENT'),
+            'negativeFloatCount': sum(1 for r in variance_rows if r['negativeFloat']),
+            'zeroFloatCount': sum(1 for r in variance_rows if r['currentTotalFloat'] == 0),
+            'nearCriticalCount': sum(1 for r in variance_rows if r['nearCritical']),
+            'drivingCount': sum(1 for r in variance_rows if r['driving']),
+            'milestonesBehindComparison': sum(1 for r in milestone_rows if r['direction'] == 'UNFAVORABLE'),
+            'milestonesAheadOfComparison': sum(1 for r in milestone_rows if r['direction'] == 'FAVORABLE'),
+            'highExposureCount': sum(1 for r in variance_rows if r['assessment'] == 'HIGH_EXPOSURE'),
+            'warningCount': sum(1 for r in variance_rows if r['assessment'] == 'WARNING'),
+            'monitorCount': sum(1 for r in variance_rows if r['assessment'] == 'MONITOR'),
+            'currentProjectFinish': completion_milestone['currentFinish'] if completion_milestone else None,
+            'comparisonProjectFinish': completion_milestone['comparisonFinish'] if completion_milestone else None,
+            'projectFinishVarianceDays': completion_milestone['finishVarianceDays'] if completion_milestone else None,
+            'projectFinishTotalFloat': completion_milestone['currentTotalFloat'] if completion_milestone else None,
+        }
+
+        result.update({
+            'available': True, 'reason': None,
+            'thresholds': {
+                'nearCriticalFloatDays': activity_analysis.NEAR_CRITICAL_FLOAT_THRESHOLD,
+                'severeNegativeFloatDays': float_intelligence.SEVERE_NEGATIVE_FLOAT_THRESHOLD,
+            },
+            'summary': summary,
+            'completionMilestone': completion_milestone,
+            'completionInterpretation': variance_intelligence.completion_interpretation(completion_milestone),
+            'areaSummary': area_summary,
+            'topVarianceExposure': ranked,
+            'milestoneVariance': milestone_variance,
+            'updateMovement': update_movement,
+            'narrative': narrative,
+            'calendarConfidence': analysis['calendarConfidence'],
+        })
+    except Exception as exc:
+        import traceback
+        return error_response(f'Variance intelligence error: {exc} | {traceback.format_exc()[-600:]}', status=500)
+
+    return JsonResponse({
+        'projectId': str(project.id),
+        'currentVersionId': str(ctx['current'].id), 'currentVersionLabel': ctx['current'].version_label or ctx['current'].original_filename,
+        'currentDataDate': ctx['current_dd'].isoformat() if ctx['current_dd'] else None,
+        'previousVersionId': str(ctx['previous'].id) if ctx['previous'] else None,
+        'previousVersionLabel': (ctx['previous'].version_label or ctx['previous'].original_filename) if ctx['previous'] else None,
         'baselineVersionId': str(ctx['baseline'].id) if ctx['baseline'] else None,
         'baselineVersionLabel': (ctx['baseline'].version_label or ctx['baseline'].original_filename) if ctx['baseline'] else None,
         **result,

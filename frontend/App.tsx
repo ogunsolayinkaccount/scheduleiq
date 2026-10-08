@@ -14,6 +14,7 @@ import GanttView from "./GanttView";
 import RiskIntelligence from "./RiskIntelligence";
 import ActivityAnalysis from "./ActivityAnalysis";
 import FloatAnalysis from "./FloatAnalysis";
+import VarianceIntelligence from "./VarianceIntelligence";
 import Intelligence from "./Intelligence";
 import Dashboard from "./Dashboard";
 import FieldDashboard from "./FieldDashboard";
@@ -1104,6 +1105,37 @@ function generateDemo(){
 }
 
 // ─── HEADER ───────────────────────────────────────────────────────────────────
+// A nav item with `children` renders as an expandable group instead of a
+// flat button — used only for Variance (Variance Analysis / Variance
+// Intelligence) so we gain a second workspace without adding another
+// top-level tab. Every other nav item is untouched.
+function NavDropdown({item,view,setView}:{item:any;view:string;setView:(v:string)=>void}){
+  const [open,setOpen]=useState(false);
+  const activeChild=item.children.find((c:any)=>c.id===view);
+  const isActive=!!activeChild;
+  return(
+    <div style={{position:"relative"}}>
+      <button onClick={()=>setOpen(o=>!o)}
+        style={{background:item.highlight&&!isActive?"rgba(212,168,67,0.07)":"transparent",border:"none",borderBottom:`2px solid ${isActive?C.accent:"transparent"}`,color:isActive?C.accent:item.highlight?C.gold:C.muted2,padding:"8px 11px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:isActive?800:700,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap",transition:"all 0.13s"}}>
+        <span style={{fontSize:12}}>{item.icon}</span>{item.label}
+        <span style={{fontSize:9,marginLeft:1}}>{open?"▲":"▼"}</span>
+      </button>
+      {open&&(
+        <>
+          <div onClick={()=>setOpen(false)} style={{position:"fixed",inset:0,zIndex:149}}/>
+          <div style={{position:"absolute",top:"100%",left:0,zIndex:150,background:C.card,border:`1px solid ${C.border}`,borderRadius:8,boxShadow:"0 6px 18px rgba(0,0,0,0.18)",minWidth:200,marginTop:2,overflow:"hidden"}}>
+            {item.children.map((c:any)=>(
+              <button key={c.id} onClick={()=>{setView(c.id);setOpen(false);}}
+                style={{display:"block",width:"100%",textAlign:"left",background:view===c.id?`${C.accent}14`:"transparent",border:"none",borderLeft:`3px solid ${view===c.id?C.accent:"transparent"}`,color:view===c.id?C.accent:C.text,padding:"9px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:view===c.id?800:600}}>
+                {c.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,setView,allActivities,onGoToActivity,dataDate,onDataDateChange,onResetDataDateToToday,onDeleteProject}:any){
   const addRef=useRef<HTMLInputElement>(null);
   const todayStr=new Date().toISOString().slice(0,10);
@@ -1116,7 +1148,10 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
     {id:"scurve",    label:"S-Curves",     icon:"📈"},
     {id:"gantt",     label:"Gantt",        icon:"📅", highlight:true},
     {id:"critical",  label:"Critical Path",icon:"🔴"},
-    {id:"variance",  label:"Variance",     icon:"📐",highlight:true},
+    {id:"variance",  label:"Variance",     icon:"📐",highlight:true, children:[
+      {id:"variance", label:"Variance Analysis"},
+      {id:"varianceIntelligence", label:"Variance Intelligence"},
+    ]},
     {id:"evm",       label:"EVM & MH",     icon:"💰",highlight:true},
     {id:"histogram", label:"Histograms",   icon:"📊"},
     {id:"diff",      label:"Schedule Diff",icon:"🔀"},
@@ -1181,7 +1216,9 @@ function Header({files,selectedIds,onSelectionChange,onSelectFiles,onReset,view,
         <UserBadge/>
       </div>
       <div style={{display:"flex",padding:"0 14px",gap:0,flexWrap:"wrap"}}>
-        {nav.map((v:any)=>(
+        {nav.map((v:any)=>v.children?(
+          <NavDropdown key={v.id} item={v} view={view} setView={setView}/>
+        ):(
           <button key={v.id} onClick={()=>setView(v.id)} style={{background:v.highlight&&view!==v.id?"rgba(212,168,67,0.07)":"transparent",border:"none",borderBottom:`2px solid ${view===v.id?C.accent:"transparent"}`,color:view===v.id?C.accent:v.highlight?C.gold:C.muted2,padding:"8px 11px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:view===v.id?800:700,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap",transition:"all 0.13s"}}>
             <span style={{fontSize:12}}>{v.icon}</span>{v.label}{v.highlight&&view!==v.id&&<span style={{fontSize:8,background:C.gold,color:"#000",borderRadius:4,padding:"1px 4px",fontWeight:700,marginLeft:2}}>NEW</span>}
           </button>
@@ -5991,6 +6028,9 @@ function AppShell(){
   // One-shot filter seed for Float Analysis — Main Dashboard's Float
   // Health panel (negative/zero/near-critical).
   const [preferredFloatFilter,setPreferredFloatFilter]=useState<"negative"|"zero"|"nearCritical"|undefined>(undefined);
+  // One-shot filter seed for Variance Intelligence — Field Dashboard's
+  // Schedule Variance & Completion panel (Warning/High Exposure drill-down).
+  const [preferredAssessmentFilter,setPreferredAssessmentFilter]=useState<string|undefined>(undefined);
   const handleManageVersions=useCallback((projectId:string)=>{
     setPreferredProjectId(projectId);
     setPreferredSubTab("versions");
@@ -6040,6 +6080,15 @@ function AppShell(){
     setPreferredVersionId(versionId);
     setView("issueRegister");
   },[]);
+  // Field Dashboard's Schedule Variance & Completion panel — "View Full
+  // Variance Intelligence" (no filter) and Warning/High Exposure KPI
+  // drill-down (with filter) both route through here, same endpoint/engine.
+  const handleOpenVarianceIntelligence=useCallback((projectId:string,versionId?:string,assessmentFilter?:string)=>{
+    setPreferredProjectId(projectId);
+    setPreferredVersionId(versionId);
+    setPreferredAssessmentFilter(assessmentFilter);
+    setView("varianceIntelligence");
+  },[]);
   const handleDashboardOpenProjectControls=useCallback((projectId:string,versionId:string,subTab?:string)=>{
     setPreferredProjectId(projectId);
     setPreferredSubTab(subTab);
@@ -6063,6 +6112,7 @@ function AppShell(){
     setPreferredActivityId(undefined);
     setPreferredActivityFilters(undefined);
     setPreferredFloatFilter(undefined);
+    setPreferredAssessmentFilter(undefined);
     setView(v);
   },[]);
   const [M,setM]=useState<any>(null);
@@ -6563,6 +6613,7 @@ function AppShell(){
           {view==="issueRegister"                    &&<IssueRegister initialProjectId={preferredProjectId} initialVersionId={preferredVersionId}/>}
           {view==="activityAnalysis"                  &&<ActivityAnalysis initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialFilters={preferredActivityFilters} onOpenFloatAnalysis={handleOpenFloatAnalysis} onOpenRiskRecovery={handleAnalyzeRecovery}/>}
           {view==="floatAnalysis"                     &&<FloatAnalysis initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialActivityId={preferredActivityId} initialFloatFilter={preferredFloatFilter}/>}
+          {view==="varianceIntelligence"               &&<VarianceIntelligence initialProjectId={preferredProjectId} initialVersionId={preferredVersionId} initialAssessmentFilter={preferredAssessmentFilter}/>}
           {view==="projectControls"                  &&<ProjectControls initialProjectId={preferredProjectId} initialSubTab={preferredSubTab}/>}
           {view==="baselineProgress"                  &&<BaselineProgress initialProjectId={preferredProjectId} onManageVersions={handleManageVersions}/>}
           {view==="intelligence"                      &&<Intelligence onOpenRecovery={(pid,vid)=>handleAnalyzeRecovery(pid,vid,undefined)}/>}

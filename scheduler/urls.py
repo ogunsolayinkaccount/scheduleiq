@@ -25,6 +25,7 @@ from .views import (
     project_earned_value,
     project_executive_summary,
     project_float_analysis,
+    project_variance_intelligence,
     project_float_trend,
     project_dashboard_summary,
     project_milestones,
@@ -92,6 +93,7 @@ urlpatterns = [
     path('projects/<str:pk>/versions/', project_versions, name='project_versions'),
     path('projects/<str:pk>/activity-analysis/', project_activity_analysis, name='project_activity_analysis'),
     path('projects/<str:pk>/float-analysis/', project_float_analysis, name='project_float_analysis'),
+    path('projects/<str:pk>/variance-intelligence/', project_variance_intelligence, name='project_variance_intelligence'),
     path('projects/<str:pk>/float-trend/', project_float_trend, name='project_float_trend'),
     path('projects/<str:pk>/dashboard-summary/', project_dashboard_summary, name='project_dashboard_summary'),
     # Must be registered BEFORE versions/<str:version_id>/ below, or that

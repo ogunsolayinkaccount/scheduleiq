@@ -101,6 +101,7 @@ EXPECTED_ROLES = {
     'project_field_dashboard_summary': {'default': V},
     'project_activity_analysis': {'default': V},
     'project_float_analysis': {'default': V},
+    'project_variance_intelligence': {'default': V},
     'project_dashboard_summary': {'default': V},
     'project_float_trend': {'default': V},
     'users_list': {'default': A},
