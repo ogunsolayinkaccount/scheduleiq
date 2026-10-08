@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect, Fragment, createContext, useContext } from "react";
 import { idbSave, idbLoadAll, idbDelete } from "./idb";
+import { formatStatusPieLabel, isWideEnoughForOutsideLabels, formatPieTooltipPercent } from "./dashboardFormat";
 import { notifyProjectsChanged } from "./projectEvents";
 import { deleteConfirmationBody } from "./importProtection";
 import { useAuth } from "./AuthContext";
@@ -631,6 +632,123 @@ function CC({title,children,height=260,flex="1 1 360px",headerExtra}:any){
     </div>
   );
 }
+
+// ─── Activity Status pie — percentage + status name outside the slice, with
+// a leader line, falling back to the original inside-label style on narrow
+// cards so labels never overlap/clip. Percentages are Recharts' own
+// `percent` (value / total of the data array passed to <Pie>, recomputed
+// every render from the real statusPie counts) — never a second, hand-rolled
+// calculation. Colors are untouched: still whatever `fill` the backend
+// (scheduler/utils.py's status_pie) already assigns per slice. ───────────
+const PIE_LABEL_RADIAN = Math.PI / 180;
+function renderOutsideStatusLabel(props: any) {
+  const { cx, cy, midAngle, outerRadius, percent, name, value, fill } = props;
+  const labelText = formatStatusPieLabel(name, value, percent);
+  if (!labelText) return null; // zero-count statuses get no outside label
+  const sin = Math.sin(-PIE_LABEL_RADIAN * midAngle);
+  const cos = Math.cos(-PIE_LABEL_RADIAN * midAngle);
+  const sx = cx + (outerRadius + 3) * cos;
+  const sy = cy + (outerRadius + 3) * sin;
+  const mx = cx + (outerRadius + 14) * cos;
+  const my = cy + (outerRadius + 14) * sin;
+  const ex = mx + (cos >= 0 ? 1 : -1) * 8;
+  const ey = my;
+  const textAnchor = cos >= 0 ? "start" : "end";
+  return (
+    <g>
+      <path d={`M${sx},${sy}L${mx},${my}L${ex},${ey}`} stroke={fill} fill="none" strokeWidth={1} />
+      <circle cx={sx} cy={sy} r={1.5} fill={fill} stroke="none" />
+      <text x={ex + (cos >= 0 ? 3 : -3)} y={ey} textAnchor={textAnchor} dominantBaseline="central" fontSize={11} fontWeight={700} fill={C.text}>
+        {labelText}
+      </text>
+    </g>
+  );
+}
+function StatusPieTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  const total = p.payload?.__total ?? 0;
+  return (
+    <div style={{ background: "#060e1c", border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
+      <div style={{ color: p.payload?.fill || C.text, fontWeight: 700, marginBottom: 4 }}>{p.name}</div>
+      <div style={{ color: C.text }}>{p.value.toLocaleString()} activities</div>
+      <div style={{ color: C.muted2 }}>{formatPieTooltipPercent(p.value, total)}</div>
+    </div>
+  );
+}
+function ActivityStatusPieChart({ data }: { data: any[] }) {
+  const [wide, setWide] = useState(true);
+  const total = data.reduce((s, e) => s + (e.value || 0), 0);
+  const dataWithTotal = useMemo(() => data.map(e => ({ ...e, __total: total })), [data, total]);
+  return (
+    <ResponsiveContainer onResize={(w: number) => setWide(isWideEnoughForOutsideLabels(w))}>
+      <PieChart>
+        <Pie data={dataWithTotal} cx="50%" cy="50%" outerRadius={wide ? 54 : 70} innerRadius={wide ? 26 : 32} dataKey="value"
+          labelLine={false}
+          label={wide ? renderOutsideStatusLabel : ({ percent }: any) => `${Math.round(percent * 100)}%`}
+          fontSize={11}>
+          {dataWithTotal.map((e: any, i: number) => <Cell key={i} fill={e.fill} />)}
+        </Pie>
+        <Tooltip content={<StatusPieTooltip />} />
+        <Legend iconSize={9} wrapperStyle={{ fontSize: 10 }} />
+      </PieChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ─── Cross-Filter Dashboard pie charts (Activity Status, Criticality
+// Distribution) — same outside-label/leader-line design and responsive
+// fallback as ActivityStatusPieChart above (reuses renderOutsideStatusLabel
+// directly, a generic function), extended with the onClick/opacity/stroke
+// cross-filter interactivity those two charts already had. The narrow-width
+// fallback is "no per-slice label" (legend + tooltip only), matching this
+// dashboard's own pre-existing look — never an inside label, which would
+// duplicate the outside one. Tooltip percentage uses one decimal place
+// (formatPieTooltipPercent) per this dashboard's own request; the outside
+// label stays a whole number via the shared formatStatusPieLabel. ────────
+function CrossFilterPieTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0];
+  const total = p.payload?.__total ?? 0;
+  return (
+    <div style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
+      <div style={{ color: p.payload?.fill || C.text, fontWeight: 700, marginBottom: 4 }}>{p.name}</div>
+      <div style={{ color: C.text }}>{p.value.toLocaleString()} activities</div>
+      <div style={{ color: C.muted2 }}>{formatPieTooltipPercent(p.value, total)}</div>
+    </div>
+  );
+}
+function CrossFilterPieCard({ title, data, field, xFilt, toggleXFilt, xActive, xHintNode, cardStyle }: {
+  title: string; data: any[]; field: string; xFilt: { field: string; value: string } | null;
+  toggleXFilt: (field: string, value: string) => void; xActive: (field: string, value: string) => boolean;
+  xHintNode: React.ReactNode; cardStyle: any;
+}) {
+  const [wide, setWide] = useState(true);
+  const total = data.reduce((s, e) => s + (e.value || 0), 0);
+  const dataWithTotal = useMemo(() => data.map(e => ({ ...e, __total: total })), [data, total]);
+  return (
+    <div style={cardStyle}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 10 }}>{title}</div>
+      <ResponsiveContainer width="100%" height={wide ? 240 : 200} onResize={(w: number) => setWide(isWideEnoughForOutsideLabels(w))}>
+        <PieChart>
+          <Pie data={dataWithTotal} cx="50%" cy="50%" outerRadius={wide ? 60 : 78} dataKey="value"
+            labelLine={false} label={wide ? renderOutsideStatusLabel : undefined}
+            onClick={(e: any) => toggleXFilt(field, e.name)} style={{ cursor: "pointer" }}>
+            {dataWithTotal.map((entry: any) => (
+              <Cell key={entry.name} fill={entry.fill}
+                opacity={xFilt?.field === field && !xActive(field, entry.name) ? 0.3 : 1}
+                stroke={xActive(field, entry.name) ? C.text : "none"} strokeWidth={2} />
+            ))}
+          </Pie>
+          <Tooltip content={<CrossFilterPieTooltip />} />
+          <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, color: C.muted2 }} />
+        </PieChart>
+      </ResponsiveContainer>
+      {xHintNode}
+    </div>
+  );
+}
+
 function Sec({title,icon,children,printable=false}:any){
   const ref=useRef<HTMLDivElement>(null);
   const proj=useContext(PrintProjectContext);
@@ -1187,7 +1305,7 @@ function PortfolioView({M,files,selectedIds,allActivities,onGoToFilter,onGoToPro
     </Sec>
     <Sec title="Status & Trends" icon="🎯">
       <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
-        <CC title="Activity Status" flex="1 1 200px" height={190}><ResponsiveContainer><PieChart><Pie data={M.statusPie} cx="50%" cy="50%" outerRadius={70} innerRadius={32} dataKey="value" labelLine={false} label={({percent}:any)=>`${(percent*100).toFixed(0)}%`} fontSize={11}>{M.statusPie.map((e:any,i:number)=><Cell key={i} fill={e.fill}/>)}</Pie><Tooltip content={<TT/>}/><Legend iconSize={9} wrapperStyle={{fontSize:10}}/></PieChart></ResponsiveContainer></CC>
+        <CC title="Activity Status" flex="1 1 240px" height={230}><ActivityStatusPieChart data={M.statusPie}/></CC>
         <CC title="Criticality" flex="1 1 200px" height={190}><ResponsiveContainer><PieChart><Pie data={M.criticalPie} cx="50%" cy="50%" outerRadius={70} innerRadius={32} dataKey="value" labelLine={false} label={({percent}:any)=>`${(percent*100).toFixed(0)}%`} fontSize={11}>{M.criticalPie.map((e:any,i:number)=><Cell key={i} fill={e.fill}/>)}</Pie><Tooltip content={<TT/>}/><Legend iconSize={9} wrapperStyle={{fontSize:10}}/></PieChart></ResponsiveContainer></CC>
         <CC title="Monthly Activity Trend" flex="2 1 360px" height={190}><ResponsiveContainer><BarChart data={M.monthlyTrend.slice(-18)} margin={{left:-10}}><CartesianGrid strokeDasharray="3 3" stroke={C.border}/><XAxis dataKey="month" tick={{fill:C.muted,fontSize:9}} interval={2}/><YAxis tick={{fill:C.muted,fontSize:9}}/><Tooltip content={<TT/>}/><Legend iconSize={9} wrapperStyle={{fontSize:10}}/><Bar dataKey="complete" name="Complete" fill={C.green} stackId="a"/><Bar dataKey="inProgress" name="In Progress" fill={C.accent} stackId="a"/><Bar dataKey="notStarted" name="Not Started" fill={C.muted} stackId="a"/></BarChart></ResponsiveContainer></CC>
       </div>
@@ -4408,44 +4526,12 @@ function PowerBIView({M,allActivities,dataDate}:any){
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(330px,1fr))',gap:14,marginBottom:14}}>
 
         {/* Status Pie */}
-        <div style={card}>
-          <div style={{fontSize:12,fontWeight:700,color:C.text,marginBottom:10}}>Activity Status</div>
-          <ResponsiveContainer width="100%" height={200}>
-            <PieChart>
-              <Pie data={statusData} cx="50%" cy="50%" outerRadius={78} dataKey="value"
-                onClick={(e:any)=>toggleXFilt('status',e.name)} style={{cursor:'pointer'}}>
-                {statusData.map((entry:any)=>(
-                  <Cell key={entry.name} fill={entry.fill}
-                    opacity={xFilt?.field==='status'&&!xActive('status',entry.name)?0.3:1}
-                    stroke={xActive('status',entry.name)?C.text:'none'} strokeWidth={2}/>
-                ))}
-              </Pie>
-              <Tooltip {...ttStyle}/>
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:11,color:C.muted2}}/>
-            </PieChart>
-          </ResponsiveContainer>
-          {xHint('status','')}
-        </div>
+        <CrossFilterPieCard title="Activity Status" data={statusData} field="status"
+          xFilt={xFilt} toggleXFilt={toggleXFilt} xActive={xActive} xHintNode={xHint('status','')} cardStyle={card}/>
 
         {/* Criticality Pie */}
-        <div style={card}>
-          <div style={{fontSize:12,fontWeight:700,color:C.text,marginBottom:10}}>Criticality Distribution</div>
-          <ResponsiveContainer width="100%" height={200}>
-            <PieChart>
-              <Pie data={critData} cx="50%" cy="50%" outerRadius={78} dataKey="value"
-                onClick={(e:any)=>toggleXFilt('critType',e.name)} style={{cursor:'pointer'}}>
-                {critData.map((entry:any)=>(
-                  <Cell key={entry.name} fill={entry.fill}
-                    opacity={xFilt?.field==='critType'&&!xActive('critType',entry.name)?0.3:1}
-                    stroke={xActive('critType',entry.name)?C.text:'none'} strokeWidth={2}/>
-                ))}
-              </Pie>
-              <Tooltip {...ttStyle}/>
-              <Legend iconType="circle" iconSize={8} wrapperStyle={{fontSize:11,color:C.muted2}}/>
-            </PieChart>
-          </ResponsiveContainer>
-          {xHint('critType','')}
-        </div>
+        <CrossFilterPieCard title="Criticality Distribution" data={critData} field="critType"
+          xFilt={xFilt} toggleXFilt={toggleXFilt} xActive={xActive} xHintNode={xHint('critType','')} cardStyle={card}/>
 
         {/* Float Distribution */}
         <div style={card}>
