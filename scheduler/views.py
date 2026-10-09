@@ -6451,6 +6451,225 @@ def project_float_analysis(request, pk):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /api/projects/<id>/schedule-explorer/activities/
+# GET /api/projects/<id>/schedule-explorer/export/
+#
+# Unified Critical Path & Longest Path Schedule Explorer — a presentation
+# layer over activity_analysis.py's master rows (the SAME rows every other
+# analysis page already uses), never a second CPM/criticality engine.
+# WBS filtering changes visibility only; it never re-scopes
+# build_activity_analysis to a WBS subset, so Total Float/criticality are
+# always the real, project-wide values regardless of what's displayed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Fields the Explorer actually needs from the master row — trimmed so a
+# large schedule's response stays reasonably sized; every one of these is
+# already computed by build_activity_analysis, nothing new here.
+_SCHEDULE_EXPLORER_ROW_FIELDS = [
+    'activityId', 'activityName', 'wbs', 'wbsPath', 'wbsId', 'wbsLevel', 'wbsSortKey', 'wbsIdPath',
+    'area', 'discipline', 'contractor', 'system', 'activityType', 'activityStatus',
+    'isMilestone', 'started', 'finished', 'inProgress',
+    'currentStart', 'currentFinish', 'originalDuration', 'remainingDuration',
+    'currentTotalFloat', 'criticalActionable', 'negativeFloat', 'nearCritical',
+    'onLongestPath', 'longestPathStatus', 'predecessorCount', 'successorCount',
+]
+
+
+def _schedule_explorer_row(r):
+    return {k: r.get(k) for k in _SCHEDULE_EXPLORER_ROW_FIELDS}
+
+
+def _filter_schedule_explorer_rows(rows, params):
+    """The Explorer's own filter vocabulary — distinct from
+    _filter_analysis_rows (Activity/Float Analysis's wbs/area/.../criticalOnly
+    set), because 'WBS + descendants' and 'Critical/Longest/Both path
+    classification' have no equivalent there. Every filter is additive
+    (AND'd), same discipline as _filter_analysis_rows.
+
+    `params` is any dict-like with `.get()` — ordinarily `request.GET`,
+    but project_schedule_explorer_activities also calls this with a plain
+    copy that has `pathClassification` removed, to get the denominator
+    Critical/Longest/Both counts should be measured against, so this
+    function never needs to know about Django's request object
+    specifically."""
+    out = rows
+
+    wbs_id = params.get('wbsId')
+    if wbs_id:
+        include_descendants = params.get('includeDescendants', 'true') in ('true', '1', 'True')
+        if include_descendants:
+            # wbsIdPath is empty on any activity parsed before this field
+            # existed (real stored schedules re-imported before this
+            # feature). Falling back to an exact wbsId match for those
+            # rows is still CORRECT, just less granular than a real
+            # ancestor-path walk — it matches activities directly tagged
+            # to this node even though their deeper hierarchy isn't known,
+            # rather than silently returning nothing for a real schedule.
+            out = [r for r in out if wbs_id in (r.get('wbsIdPath') or []) or r.get('wbsId') == wbs_id]
+        else:
+            out = [r for r in out if r.get('wbsId') == wbs_id]
+
+    area = params.get('area')
+    if area:
+        out = [r for r in out if (r.get('area') or '').strip().lower() == area.strip().lower()]
+
+    status = params.get('status')
+    if status:
+        out = [r for r in out if r.get('activityStatus') == status]
+
+    search = params.get('search')
+    if search:
+        q = search.strip().lower()
+        out = [r for r in out if q in (r.get('activityId') or '').lower() or q in (r.get('activityName') or '').lower()]
+
+    path_classification = params.get('pathClassification')
+    if path_classification == 'critical':
+        out = [r for r in out if r.get('criticalActionable')]
+    elif path_classification == 'longestPath':
+        out = [r for r in out if r.get('longestPathStatus') == 'YES']
+    elif path_classification == 'both':
+        out = [r for r in out if r.get('criticalActionable') or r.get('longestPathStatus') == 'YES']
+
+    return out
+
+
+def _schedule_explorer_counts(rows):
+    critical = sum(1 for r in rows if r.get('criticalActionable'))
+    longest = sum(1 for r in rows if r.get('longestPathStatus') == 'YES')
+    both = sum(1 for r in rows if r.get('criticalActionable') or r.get('longestPathStatus') == 'YES')
+    return {'critical': critical, 'longestPath': longest, 'both': both, 'total': len(rows)}
+
+
+def _longest_path_coverage(rows):
+    """Project/version-wide Longest Path data quality, independent of any
+    filter — so the UI can show e.g. 'Longest Path verified for 842 of 850
+    activities' or 'This schedule predates Longest Path verification
+    tracking' regardless of what's currently filtered/displayed."""
+    coverage = {'YES': 0, 'NO': 0, 'UNAVAILABLE': 0, 'UNKNOWN_LEGACY': 0}
+    for r in rows:
+        coverage[r.get('longestPathStatus') or 'UNKNOWN_LEGACY'] += 1
+    return {
+        'yes': coverage['YES'], 'no': coverage['NO'],
+        'unavailable': coverage['UNAVAILABLE'], 'unknownLegacy': coverage['UNKNOWN_LEGACY'],
+        'total': len(rows),
+    }
+
+
+def _wbs_hierarchy_support(rows):
+    """Whether this version's activities actually carry a real, multi-
+    level PROJWBS ancestor path (wbsIdPath) — vs only a flat wbsId/wbs
+    name with no deeper hierarchy. A schedule imported before wbsIdPath
+    existed (e.g. the real Project Barn versions at the time of writing)
+    has a populated wbsId per activity but an EMPTY wbsIdPath for every
+    row — WBS filtering for it degrades to exact-node matching only (see
+    _filter_schedule_explorer_rows's fallback), never a genuine parent +
+    descendants walk, and the UI must say so rather than silently
+    presenting an exact match as if it were full hierarchical filtering."""
+    with_hierarchy = sum(1 for r in rows if r.get('wbsIdPath'))
+    return {
+        'hasHierarchy': with_hierarchy > 0, 'rowsWithHierarchy': with_hierarchy, 'total': len(rows),
+    }
+
+
+def _build_schedule_explorer_result(project, request):
+    """Shared by the JSON endpoint and the Excel export — one function, so
+    an export can never drift from what the screen actually shows for the
+    same query parameters."""
+    ctx = _resolve_analysis_context(project, request)
+    if not ctx:
+        return None, error_response('No schedule version available for this project', status=404)
+
+    analysis = activity_analysis.build_activity_analysis(
+        ctx['current'].activities_json,
+        previous_activities=ctx['previous'].activities_json if ctx['previous'] else None,
+        baseline_activities=ctx['baseline'].activities_json if ctx['baseline'] else None,
+        current_data_date=ctx['current_dd'], previous_data_date=ctx['previous_dd'],
+        calendars=ctx['calendars'], calendar_meta=ctx['calendar_meta'],
+        update_intelligence_result=ctx['ui_result'], milestone_report=ctx['milestone_report'],
+    )
+    all_rows = analysis['rows']
+    filtered = _filter_schedule_explorer_rows(all_rows, request.GET)
+    return {'ctx': ctx, 'allRows': all_rows, 'filteredRows': filtered}, None
+
+
+@require_role('VIEWER')
+@require_http_methods(['GET'])
+def project_schedule_explorer_activities(request, pk):
+    """Query params: currentVersion/version, previousVersion, baselineVersion
+    (standard resolution), wbsId + includeDescendants (default true),
+    area, status, search, pathClassification (critical|longestPath|both).
+    longestPathCoverage and counts are always computed from the FULL,
+    unfiltered-by-path row set (coverage) or the WBS/area/status/search-
+    filtered set (counts) — never recomputed from a path-classification-
+    filtered subset, so switching Critical/Longest/Both never changes the
+    denominator the other counts are shown against."""
+    from .models import Project
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    built, err = _build_schedule_explorer_result(project, request)
+    if err:
+        return err
+    ctx, all_rows, filtered = built['ctx'], built['allRows'], built['filteredRows']
+
+    # Counts measured against the WBS/area/status/search-filtered set but
+    # BEFORE the pathClassification cut — so toggling Critical/Longest/Both
+    # never changes what the other two counts are shown against.
+    params_without_path = request.GET.copy()
+    params_without_path.pop('pathClassification', None)
+    pre_path_filtered = _filter_schedule_explorer_rows(all_rows, params_without_path)
+
+    return JsonResponse({
+        'projectId': str(project.id), 'available': True,
+        'currentVersionId': str(ctx['current'].id), 'currentVersionLabel': ctx['current'].version_label or ctx['current'].original_filename,
+        'currentDataDate': ctx['current_dd'].isoformat() if ctx['current_dd'] else None,
+        'longestPathCoverage': _longest_path_coverage(all_rows),
+        'wbsHierarchySupport': _wbs_hierarchy_support(all_rows),
+        'counts': _schedule_explorer_counts(pre_path_filtered),
+        'rows': [_schedule_explorer_row(r) for r in filtered],
+    })
+
+
+@require_role('VIEWER')
+@require_http_methods(['GET'])
+def project_schedule_explorer_export(request, pk):
+    """Streams an .xlsx of exactly the filtered rows /schedule-explorer/
+    activities/ would return for the SAME query parameters — same shared
+    builder, so exported IDs/names/dates/float/path-classification can
+    never drift from what's on screen."""
+    from .models import Project
+    from .schedule_explorer_export import generate_schedule_explorer_excel
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    built, err = _build_schedule_explorer_result(project, request)
+    if err:
+        return err
+    ctx, filtered = built['ctx'], built['filteredRows']
+
+    try:
+        xlsx_bytes = generate_schedule_explorer_excel(
+            [_schedule_explorer_row(r) for r in filtered],
+            project.name, ctx['current'].version_label or ctx['current'].original_filename,
+            ctx['current_dd'],
+        )
+    except Exception as exc:
+        import traceback
+        return error_response(f'Excel export error: {exc} | {traceback.format_exc()[-600:]}', status=500)
+
+    response = HttpResponse(xlsx_bytes, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    filename = f'{project.name}_schedule_explorer_{ctx["current_dd"].isoformat() if ctx["current_dd"] else "export"}.xlsx'.replace(' ', '_')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GET /api/projects/<id>/variance-intelligence/
 # ─────────────────────────────────────────────────────────────────────────────
 

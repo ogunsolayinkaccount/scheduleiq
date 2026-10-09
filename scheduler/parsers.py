@@ -2,7 +2,7 @@ import re
 import io
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import pandas as pd
 
@@ -179,6 +179,29 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             cur = wbs_parent_map.get(cur, '') or ''
         _level_cache[wbs_id] = level
         return level
+
+    # Root-to-leaf list of real PROJWBS wbs_ids — the Schedule Explorer's
+    # WBS tree/descendant-filtering key. Deliberately id-based, never a
+    # name/path string: two WBS nodes can legitimately share a leaf name
+    # under different parents (e.g. "Foundations" under both Area A and
+    # Area B), and a name-based prefix match would wrongly merge them.
+    # wbs_id is globally unique per PROJWBS row, so it cannot collide.
+    _id_path_cache: Dict[str, Tuple[str, ...]] = {}
+    def get_wbs_id_path(wbs_id: str) -> Tuple[str, ...]:
+        if not wbs_id or wbs_id not in wbs_rows_by_id:
+            return ()
+        if wbs_id in _id_path_cache:
+            return _id_path_cache[wbs_id]
+        parts: list = []
+        cur = wbs_id
+        visited: set = set()
+        while cur and cur not in visited and cur in wbs_rows_by_id:
+            visited.add(cur)
+            parts.insert(0, cur)
+            cur = wbs_parent_map.get(cur, '') or ''
+        result = tuple(parts)
+        _id_path_cache[wbs_id] = result
+        return result
 
     # ── Resource master (RSRC table) — name, type, unit per resource ID ────────
     rsrc_master: Dict[str, dict] = {}
@@ -372,6 +395,22 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             remain_dur   = 0.0
 
         r = rsrc_map.get(task_id, _zero())
+
+        # Longest Path verification — two-tier check, never collapsed to a
+        # single boolean. `'driving_path_flag' in t` tells us whether THIS
+        # file's TASK table carried the column at all (parse_xer always
+        # populates every header key for every row, blank-or-not, so a
+        # missing key here means the column itself was absent from this
+        # export — an older P6 XER schema, or a non-standard exporter).
+        # `_dpf_raw` being blank after that means the column existed but
+        # this SPECIFIC activity's value wasn't populated (e.g. an
+        # unscheduled or WBS-summary-like row) — also genuinely
+        # unverifiable, not a confirmed "No". Only when both the column
+        # and this row's own value are present do we trust Y/N.
+        _dpf_raw = (t.get('driving_path_flag') or '').strip()
+        _on_longest_path_verified = ('driving_path_flag' in t) and _dpf_raw != ''
+        _on_longest_path = (_dpf_raw.upper() in ('Y', 'TRUE', '1')) if _on_longest_path_verified else False
+
         activities.append({
             'id':           task_id,
             'code':         t.get('task_code') or task_id,
@@ -382,6 +421,7 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             'wbs':          wbs_map.get(t.get('wbs_id', ''), ''),
             'wbsPath':      get_wbs_path(t.get('wbs_id', '')),
             'wbsId':        t.get('wbs_id', '') or '',
+            'wbsIdPath':    list(get_wbs_id_path(t.get('wbs_id', ''))),
             'wbsCode':      get_wbs_code(t.get('wbs_id', '')),
             'wbsLevel':     get_wbs_level(t.get('wbs_id', '')),
             'wbsSortKey':   get_wbs_sort_key(t.get('wbs_id', '')),
@@ -436,7 +476,8 @@ def xer_to_activities(sections: Dict[str, List[dict]], file_name: str) -> List[d
             'constraintDate':    parse_date(t.get('cstr_date')),
             'constraint2Type':   t.get('cstr_type2') or '',
             'constraint2Date':   parse_date(t.get('cstr_date2')),
-            'onLongestPath':     str(t.get('driving_path_flag', 'N')).upper() in ('Y', 'TRUE', '1'),
+            'onLongestPath':         _on_longest_path,
+            'onLongestPathVerified': _on_longest_path_verified,
             'floatPath':         (int(t['float_path']) if t.get('float_path') and str(t.get('float_path', '0')).strip().lstrip('-').isdigit() else None),
             'priority':          (int(t['priority_num']) if t.get('priority_num') and str(t.get('priority_num', '0')).strip().isdigit() else None),
             'calendarId':        t.get('clndr_id') or '',
@@ -738,6 +779,12 @@ def parse_msp_xml(xml_text: str, file_name: str) -> List[dict]:
             'cost':        0.0,
             'isCritical':  bool(is_critical or total_float <= 0),
             'isMilestone': bool(is_mile),
+            # MS Project XML carries no P6-equivalent driving-path flag —
+            # explicitly False/unverified, never left absent (an absent
+            # key reads as "predates verification tracking", which this
+            # import is NOT; it genuinely never had this concept).
+            'onLongestPath':         False,
+            'onLongestPathVerified': False,
             'predecessors': msp_preds_map.get(uid, []),
             'successors':   msp_succs_map.get(uid, []),
             'predCount':   len(msp_preds_map.get(uid, [])),
@@ -957,6 +1004,12 @@ def parse_pdf_schedule(pdf_file_obj) -> List[dict]:
             'cost':        0.0,
             'isCritical':  total_float is not None and total_float <= 0,
             'isMilestone': dur == 0,
+            # A PDF table/Gantt extraction carries no P6-equivalent driving-
+            # path flag — explicitly False/unverified, matching the MSP XML
+            # parser's own discipline (see its comment for why absent-vs-
+            # False matters).
+            'onLongestPath':         False,
+            'onLongestPathVerified': False,
             'predCount':   0,
             'succCount':   0,
         }

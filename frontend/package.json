@@ -13,7 +13,8 @@
     "test:importProtection": "tsc importProtection.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/importProtection.test.mjs",
     "test:auth": "tsc auth.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/auth.test.mjs",
     "test:fieldDashboardVariance": "tsc fieldDashboardVarianceFormat.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/fieldDashboardVarianceFormat.test.mjs",
-    "test:weeklyFieldReport": "tsc weeklyFieldReportFormat.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/weeklyFieldReportFormat.test.mjs"
+    "test:weeklyFieldReport": "tsc weeklyFieldReportFormat.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/weeklyFieldReportFormat.test.mjs",
+    "test:scheduleExplorer": "tsc scheduleExplorerFormat.ts --outDir .tmp-test --module esnext --target es2020 --lib es2020,dom --skipLibCheck && node --test tests/scheduleExplorerFormat.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

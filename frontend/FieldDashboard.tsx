@@ -10,6 +10,7 @@ import {
   computeCostUtilizationPercent, formatCostUtilizationPercent, formatHeadcount, mondayOfWeek, computeForecastAccuracy,
 } from "./weeklyFieldReportFormat";
 import { useAuth, hasAtLeastRole } from "./AuthContext";
+import ScheduleExplorer from "./ScheduleExplorer";
 
 const C = {
   bg: "#f5f2ec", panel: "#ede9df", card: "#ffffff", card2: "#f0ece4",
@@ -1075,6 +1076,26 @@ function WeeklyFieldReportPanel({ projectId, versions, reports, loading, error, 
   );
 }
 
+function ScheduleExplorerPanel({ projectId, versionId, versions }: { projectId: string; versionId: string; versions: any[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const toggle = (
+    <button onClick={() => setExpanded(e => !e)} style={{ background: "transparent", border: "none", color: C.accent, cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+      {expanded ? "Collapse ▲" : "Expand ▼"}
+    </button>
+  );
+  return (
+    <Panel title="Critical & Longest Path Schedule Explorer" action={toggle}>
+      {!expanded ? (
+        <div style={{ fontSize: 12, color: C.muted }}>
+          Interactive Critical Path / Longest Path / WBS schedule visualization — expand to explore the activities driving project completion.
+        </div>
+      ) : (
+        <ScheduleExplorer projectId={projectId} versionId={versionId} versions={versions} />
+      )}
+    </Panel>
+  );
+}
+
 // ─── root ───────────────────────────────────────────────────────────────
 
 export default function FieldDashboard({ initialProjectId, initialVersionId, onOpenIssueRegister, onOpenVarianceIntelligence, onOpenFloatAnalysis }: {
@@ -1135,6 +1156,8 @@ export default function FieldDashboard({ initialProjectId, initialVersionId, onO
 
           <VarianceCompletionPanel vi={vi.data} loading={vi.loading} error={vi.error} projectId={ctx.projectId} versionId={ctx.versionId}
             onOpenVarianceIntelligence={onOpenVarianceIntelligence} onOpenFloatAnalysis={onOpenFloatAnalysis} />
+
+          <ScheduleExplorerPanel key={`explorer-${ctx.projectId}-${ctx.versionId}`} projectId={ctx.projectId} versionId={ctx.versionId} versions={ctx.versions} />
 
           <ContractualMilestoneTracker projectId={ctx.projectId} panel={data.contractualMilestones}
             warningThresholdDays={warningThresholdDays} onThresholdChange={setWarningThresholdDays} onChanged={reload} />

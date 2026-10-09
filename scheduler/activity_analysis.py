@@ -414,11 +414,32 @@ def build_activity_analysis(
         # ── Risk & Recovery — reused, never recomputed ──
         risk = risk_by_key.get(aid)
 
+        # ── Longest Path status — four states, never collapsed to a
+        # boolean. `onLongestPathVerified` is absent (None via .get()) on
+        # any activity parsed before this field existed (an already-
+        # persisted ScheduleUpload) — that MUST read as its own
+        # 'UNKNOWN_LEGACY' state, never silently as 'UNAVAILABLE' (which
+        # asserts "we checked this file and it genuinely lacks the data",
+        # a claim we cannot make about data parsed before the check
+        # existed) and never as a confirmed 'NO'. See parsers.py's XER/
+        # MSP-XML/PDF parsers and column_mapping.py for where the other
+        # three states are decided, at parse time, from the source file
+        # itself — this only classifies what they already determined. ──
+        _lp_verified = a.get('onLongestPathVerified')
+        if _lp_verified is None:
+            longest_path_status = 'UNKNOWN_LEGACY'
+        elif _lp_verified:
+            longest_path_status = 'YES' if a.get('onLongestPath') else 'NO'
+        else:
+            longest_path_status = 'UNAVAILABLE'
+
         rows.append({
             # Identity
             'activityId': aid, 'activityName': a.get('name') or '',
             'project': a.get('projectName') or a.get('projectId') or None,
             'wbs': a.get('wbs') or '', 'wbsPath': a.get('wbsPath') or '',
+            'wbsId': a.get('wbsId') or '', 'wbsLevel': a.get('wbsLevel'),
+            'wbsSortKey': a.get('wbsSortKey') or '', 'wbsIdPath': a.get('wbsIdPath') or [],
             'area': a.get('area') or '', 'discipline': a.get('discipline') or '',
             'contractor': a.get('contractor') or '', 'system': a.get('system') or '',
             'activityType': a.get('type') or '', 'activityStatus': a.get('status') or '',
@@ -480,6 +501,7 @@ def build_activity_analysis(
             'critical': critical, 'criticalActionable': critical_actionable,
             'newlyCritical': newly_critical, 'noLongerCritical': no_longer_critical,
             'nearCritical': near_critical, 'onLongestPath': bool(a.get('onLongestPath')), 'driving': bool(a.get('onLongestPath')),
+            'longestPathStatus': longest_path_status,
             # Logic
             'predecessorCount': len(preds), 'successorCount': len(succs), 'relationshipCount': rel_count,
             'fsCount': pred_counts['fs'] + succ_counts['fs'], 'ssCount': pred_counts['ss'] + succ_counts['ss'],

@@ -358,6 +358,12 @@ def build_activities_from_mapping(df: 'pd.DataFrame', mapped: Dict[str, str], fi
             'cost': float(cost or 0.0),
             'isCritical': bool(total_float is not None and total_float <= 0 and not is_milestone),
             'isMilestone': bool(is_milestone),
+            # Excel/CSV carries no P6-equivalent driving-path flag —
+            # explicitly False/unverified (see parsers.py's MSP XML/PDF
+            # parsers for the same discipline and why absent-vs-False
+            # matters for the Schedule Explorer's Longest Path filter).
+            'onLongestPath': False,
+            'onLongestPathVerified': False,
         }
 
         for field_key, out_key, is_date in _EXTRA_FIELD_OUTPUT:
