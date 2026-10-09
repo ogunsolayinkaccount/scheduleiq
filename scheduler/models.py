@@ -1173,3 +1173,68 @@ class ProjectControlsReport(models.Model):
 
     def __str__(self):
         return f'{self.get_report_type_display()} — {self.project.name} ({self.data_date or "no date"})'
+
+
+class WeeklyFieldReport(models.Model):
+    """
+    A dated, project-scoped Weekly Field Operations snapshot — the one
+    genuinely new capability identified by the Field Operations Review
+    Template Assessment. Every field here is a deliberate manual entry;
+    NONE of it is inferred from the schedule. In particular, headcount is
+    NEVER derived from P6 resource/budgeted hours (compute_productivity
+    in cost_engine.py) — hours and headcount are different units with no
+    fixed conversion, and conflating them was the audit's central risk
+    finding.
+
+    One row per (project, week_start_date) — creating a new week's report
+    never overwrites a prior week's row; historical weeks are permanent.
+    Editing the CURRENT week's row is allowed (via PATCH) and is recorded
+    in AuditLog (object_type='WeeklyFieldReport'), the same append-only
+    audit trail Schedule Version deletion already uses — no separate
+    revision table is introduced for this.
+
+    schedule_upload is optional and purely informational (which version
+    was current when this report was filed) — never written to by this
+    model, matching the same SET_NULL, no-back-reference discipline
+    ManualCostEntry already uses for the same reason.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='weekly_field_reports')
+    schedule_upload = models.ForeignKey(
+        ScheduleUpload, on_delete=models.SET_NULL, null=True, blank=True, related_name='weekly_field_reports',
+    )
+
+    week_start_date = models.DateField()
+
+    # Field Verified — a human-counted actual, never inferred from hours.
+    actual_headcount = models.PositiveIntegerField(null=True, blank=True)
+    # Forecast — next week's expected headcount.
+    next_week_forecast_headcount = models.PositiveIntegerField(null=True, blank=True)
+    # PM Forecast — the Project Manager's own projection, a deliberately
+    # distinct figure from the next-week forecast above.
+    pm_projected_headcount = models.PositiveIntegerField(null=True, blank=True)
+    # Manual Target — a goal, never a measurement.
+    monthly_target_headcount = models.PositiveIntegerField(null=True, blank=True)
+
+    # Manual Entry — the last date the schedule/status was communicated
+    # to the client; ScheduleIQ tracks no client-communication log
+    # anywhere else, so this is the sole source for this fact.
+    last_client_update_date = models.DateField(null=True, blank=True)
+
+    # Authenticated identities only (Phase 3), never a caller-supplied
+    # body field — same discipline as ProjectIssue.created_by/updated_by.
+    created_by = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_by = models.CharField(max_length=200, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-week_start_date']
+        unique_together = [('project', 'week_start_date')]
+        indexes = [
+            models.Index(fields=['project', 'week_start_date']),
+        ]
+
+    def __str__(self):
+        return f'Weekly Field Report — {self.project.name} ({self.week_start_date})'

@@ -6,6 +6,8 @@ import {
 } from "recharts";
 import { formatDataDate, versionSelectLabel, dedupeVersionsById } from "./dateFormat";
 import { resolveCompletionStatus, isRegisteredCompletion, completionPanelTitle, buildVarianceIntelligenceUrl } from "./fieldDashboardVarianceFormat";
+import { computeCostUtilizationPercent, formatCostUtilizationPercent, formatHeadcount, mondayOfWeek } from "./weeklyFieldReportFormat";
+import { useAuth, hasAtLeastRole } from "./AuthContext";
 
 const C = {
   bg: "#f5f2ec", panel: "#ede9df", card: "#ffffff", card2: "#f0ece4",
@@ -118,6 +120,30 @@ function useVarianceIntelligenceSummary(ctx: ReturnType<typeof useProjectsAndVer
   }, [ctx.projectId, ctx.versionId]);
 
   return { data, loading, error };
+}
+
+// Weekly Field Operations Review — fetches the project-scoped manual
+// snapshot history. Independent of schedule version (a weekly report
+// covers a calendar week, not a P6 update), though it may optionally
+// reference one. Never computes a value itself; see
+// weeklyFieldReportFormat.ts for the one derived figure (Cost Utilization)
+// this feature introduces, which only ever reads financials already
+// fetched by useFieldDashboardSummary above.
+function useWeeklyFieldReports(projectId: string) {
+  const [reports, setReports] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => {
+    if (!projectId) { setReports([]); return; }
+    setLoading(true); setError(null);
+    sfetch(`${API}/api/projects/${projectId}/weekly-field-reports/`)
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t); return JSON.parse(t); })
+      .then(d => setReports(d.reports || [])).catch((e: any) => setError(e.message || String(e))).finally(() => setLoading(false));
+  };
+  useEffect(load, [projectId]);
+
+  return { reports, loading, error, reload: load };
 }
 
 function Select({ value, onChange, options, placeholder }: any) {
@@ -566,6 +592,215 @@ function VarianceCompletionPanel({ vi, loading, error, projectId, versionId, onO
   );
 }
 
+// ─── Weekly Field Operations Review ────────────────────────────────────────
+// The one new capability the Field Operations Review Template Assessment
+// identified. Every value here is a deliberate manual entry — headcount is
+// NEVER derived from P6 resource hours (see Manpower panel above for the
+// hours themselves, labeled "Schedule Data" below to keep the two concepts
+// visually distinct). Weekly history is append-only: creating a new week
+// never overwrites a prior week's row (enforced server-side); editing the
+// CURRENT week is allowed and recorded in AuditLog.
+
+function emptyWeeklyForm(weekStartDate: string) {
+  return {
+    weekStartDate, actualHeadcount: "", nextWeekForecastHeadcount: "",
+    pmProjectedHeadcount: "", monthlyTargetHeadcount: "", lastClientUpdateDate: "", scheduleVersionId: "",
+  };
+}
+
+function WeeklyFieldReportForm({ projectId, versions, initial, onSaved, onCancel }: {
+  projectId: string; versions: any[]; initial: any | null; onSaved: () => void; onCancel: () => void;
+}) {
+  const [form, setForm] = useState(() => initial ? {
+    weekStartDate: initial.weekStartDate,
+    actualHeadcount: initial.actualHeadcount ?? "", nextWeekForecastHeadcount: initial.nextWeekForecastHeadcount ?? "",
+    pmProjectedHeadcount: initial.pmProjectedHeadcount ?? "", monthlyTargetHeadcount: initial.monthlyTargetHeadcount ?? "",
+    lastClientUpdateDate: initial.lastClientUpdateDate ?? "", scheduleVersionId: initial.scheduleVersionId ?? "",
+  } : emptyWeeklyForm(mondayOfWeek(new Date().toISOString().slice(0, 10))));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const save = () => {
+    if (!form.weekStartDate) { setErr("Week start date is required."); return; }
+    setSaving(true); setErr(null);
+    const body = {
+      weekStartDate: form.weekStartDate,
+      actualHeadcount: form.actualHeadcount === "" ? null : Number(form.actualHeadcount),
+      nextWeekForecastHeadcount: form.nextWeekForecastHeadcount === "" ? null : Number(form.nextWeekForecastHeadcount),
+      pmProjectedHeadcount: form.pmProjectedHeadcount === "" ? null : Number(form.pmProjectedHeadcount),
+      monthlyTargetHeadcount: form.monthlyTargetHeadcount === "" ? null : Number(form.monthlyTargetHeadcount),
+      lastClientUpdateDate: form.lastClientUpdateDate || null,
+      scheduleVersionId: form.scheduleVersionId || null,
+    };
+    const url = initial
+      ? `${API}/api/projects/${projectId}/weekly-field-reports/${initial.id}/`
+      : `${API}/api/projects/${projectId}/weekly-field-reports/`;
+    fetch(url, { method: initial ? "PATCH" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t); return JSON.parse(t); })
+      .then(() => onSaved())
+      .catch((e: any) => { try { setErr(JSON.parse(e.message).error || e.message); } catch { setErr(e.message || String(e)); } })
+      .finally(() => setSaving(false));
+  };
+
+  const fieldStyle = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "6px 9px", fontSize: 12, fontFamily: "inherit", color: C.text, width: "100%" };
+  const field = (label: string, sub: string, input: React.ReactNode) => (
+    <div>
+      <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", marginBottom: 3 }}>{label} <span style={{ color: C.muted2 }}>({sub})</span></div>
+      {input}
+    </div>
+  );
+
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+      {initial && (
+        <div style={{ fontSize: 13, fontWeight: 800, color: C.text, marginBottom: 10 }}>
+          Editing: Week of {formatDataDate(initial.weekStartDate)}
+        </div>
+      )}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10, marginBottom: 10 }}>
+        {field("Week Start Date", initial ? "fixed — create a new report to change weeks" : "Mondays only — auto-adjusts", (
+          <input type="date" value={form.weekStartDate} disabled={!!initial}
+            onChange={e => setForm(f => ({ ...f, weekStartDate: mondayOfWeek(e.target.value) }))}
+            style={{ ...fieldStyle, opacity: initial ? 0.6 : 1 }} />
+        ))}
+        {field("Actual Headcount", "Field Verified", (
+          <input type="number" min={0} placeholder="e.g. 39" value={form.actualHeadcount}
+            onChange={e => setForm(f => ({ ...f, actualHeadcount: e.target.value }))} style={fieldStyle} />
+        ))}
+        {field("Next-Week Forecast", "Forecast", (
+          <input type="number" min={0} placeholder="e.g. 39" value={form.nextWeekForecastHeadcount}
+            onChange={e => setForm(f => ({ ...f, nextWeekForecastHeadcount: e.target.value }))} style={fieldStyle} />
+        ))}
+        {field("PM Projection", "PM Forecast", (
+          <input type="number" min={0} placeholder="e.g. 50" value={form.pmProjectedHeadcount}
+            onChange={e => setForm(f => ({ ...f, pmProjectedHeadcount: e.target.value }))} style={fieldStyle} />
+        ))}
+        {field("Monthly Target", "Manual Target", (
+          <input type="number" min={0} placeholder="e.g. 50" value={form.monthlyTargetHeadcount}
+            onChange={e => setForm(f => ({ ...f, monthlyTargetHeadcount: e.target.value }))} style={fieldStyle} />
+        ))}
+        {field("Last Client Update", "Manual Entry", (
+          <input type="date" value={form.lastClientUpdateDate}
+            onChange={e => setForm(f => ({ ...f, lastClientUpdateDate: e.target.value }))} style={fieldStyle} />
+        ))}
+        {versions.length > 0 && field("Schedule Version (optional)", "reference only", (
+          <Select value={form.scheduleVersionId} onChange={(v: string) => setForm(f => ({ ...f, scheduleVersionId: v }))}
+            placeholder="None" options={versions.map((v: any) => ({ value: v.id, label: versionSelectLabel(v) }))} />
+        ))}
+      </div>
+      {err && <div style={{ color: C.red, fontSize: 11, marginBottom: 8 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={save} disabled={saving} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>
+          {saving ? "Saving…" : initial ? "Save Changes" : "Save Weekly Report"}
+        </button>
+        <button onClick={onCancel} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function WeeklyFieldReportPanel({ projectId, versions, reports, loading, error, onChanged, financials, manpower, scheduleHealth, canEdit, onOpenIssueRegister }: {
+  projectId: string; versions: any[]; reports: any[]; loading: boolean; error: string | null; onChanged: () => void;
+  financials: any; manpower: any; scheduleHealth: any; canEdit: boolean; onOpenIssueRegister?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedId, setSelectedId] = useState("");
+  const [formMode, setFormMode] = useState<"none" | "create" | "edit">("none");
+
+  const latest = reports[0];
+  const selected = reports.find(r => r.id === selectedId) || latest;
+
+  const toggle = (
+    <button onClick={() => setExpanded(e => !e)} style={{ background: "transparent", border: "none", color: C.accent, cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 5 }}>
+      {expanded ? "Collapse ▲" : "Expand ▼"}
+    </button>
+  );
+
+  const costUtilization = computeCostUtilizationPercent(financials?.currentSpend?.value, financials?.budget?.value);
+
+  return (
+    <Panel title="Weekly Field Operations Review" action={toggle}>
+      {!expanded ? (
+        <div style={{ fontSize: 12, color: C.muted }}>
+          {latest
+            ? `Latest: week of ${formatDataDate(latest.weekStartDate)} — ${formatHeadcount(latest.actualHeadcount)} people (Field Verified).`
+            : "No weekly field reports recorded yet."}
+        </div>
+      ) : (
+        <>
+          {loading && !reports.length && <div style={{ color: C.accent, fontSize: 12, marginBottom: 10 }}>Loading…</div>}
+          {error && <div style={{ color: C.red, fontSize: 12, marginBottom: 10 }}>{error}</div>}
+
+          {reports.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", marginBottom: 3 }}>Week</div>
+                <Select value={selected?.id || ""} onChange={setSelectedId}
+                  options={reports.map((r: any) => ({ value: r.id, label: `Week of ${formatDataDate(r.weekStartDate)}` }))} />
+              </div>
+              {canEdit && selected && formMode === "none" && (
+                <button onClick={() => setFormMode("edit")} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.accent, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", alignSelf: "flex-end" }}>
+                  Edit This Report
+                </button>
+              )}
+            </div>
+          )}
+
+          {formMode === "none" && canEdit && (
+            <button onClick={() => setFormMode("create")} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", marginBottom: 12 }}>
+              + New Weekly Report
+            </button>
+          )}
+          {formMode === "create" && (
+            <WeeklyFieldReportForm projectId={projectId} versions={versions} initial={null}
+              onSaved={() => { setFormMode("none"); onChanged(); }} onCancel={() => setFormMode("none")} />
+          )}
+          {formMode === "edit" && selected && (
+            <WeeklyFieldReportForm projectId={projectId} versions={versions} initial={selected}
+              onSaved={() => { setFormMode("none"); onChanged(); }} onCancel={() => setFormMode("none")} />
+          )}
+
+          {!reports.length && formMode === "none" ? (
+            <div style={{ color: C.muted2, fontSize: 12 }}>
+              No weekly field reports recorded yet.{!canEdit && " Ask a Scheduler or Administrator to add one."}
+            </div>
+          ) : selected && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8, marginBottom: 10 }}>
+                <KpiCard label="Actual Headcount" value={formatHeadcount(selected.actualHeadcount)} sub="Field Verified" />
+                <KpiCard label="Next-Week Forecast" value={formatHeadcount(selected.nextWeekForecastHeadcount)} sub="Forecast" />
+                <KpiCard label="PM Projection" value={formatHeadcount(selected.pmProjectedHeadcount)} sub="PM Forecast" color={C.purple} />
+                <KpiCard label="Monthly Target" value={formatHeadcount(selected.monthlyTargetHeadcount)} sub="Manual Target" color={C.muted} />
+                <KpiCard label="P6 Resource Hours" value={manpower?.available ? `${manpower.actualHours ?? "—"} / ${manpower.budgetedHours ?? "—"} h` : "Unavailable"} sub="Schedule Data — hours, not headcount" />
+                <KpiCard label="Cost Utilization" value={formatCostUtilizationPercent(costUtilization)} sub="Actual Cost ÷ Budget" color={costUtilization == null ? C.muted2 : costUtilization > 100 ? C.red : C.text} />
+                <KpiCard label="Last Client Update" value={selected.lastClientUpdateDate ? formatDataDate(selected.lastClientUpdateDate) : "Unavailable"} sub="Manual Entry" />
+              </div>
+
+              {scheduleHealth?.available && (
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+                  Critical/Driving Path: {scheduleHealth.criticalCount} critical · {scheduleHealth.drivingCount} driving · {scheduleHealth.negativeFloatCount} with negative float — see Schedule Health below for detail.
+                </div>
+              )}
+
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 10, color: C.muted2 }}>
+                  Entered by {selected.createdBy || "—"} on {formatDataDate(selected.createdAt?.slice(0, 10))}
+                  {selected.updatedBy && selected.updatedAt !== selected.createdAt && ` · Last updated by ${selected.updatedBy} on ${formatDataDate(selected.updatedAt?.slice(0, 10))}`}
+                </div>
+                {onOpenIssueRegister && (
+                  <button onClick={onOpenIssueRegister} style={{ background: "transparent", border: "none", color: C.accent, cursor: "pointer", fontSize: 11, fontWeight: 700, fontFamily: "inherit", marginLeft: "auto" }}>
+                    View Project Issues →
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
 // ─── root ───────────────────────────────────────────────────────────────
 
 export default function FieldDashboard({ initialProjectId, initialVersionId, onOpenIssueRegister, onOpenVarianceIntelligence, onOpenFloatAnalysis }: {
@@ -577,6 +812,9 @@ export default function FieldDashboard({ initialProjectId, initialVersionId, onO
   const [warningThresholdDays, setWarningThresholdDays] = useState(10);
   const { data, loading, error, reload } = useFieldDashboardSummary(ctx, warningThresholdDays);
   const vi = useVarianceIntelligenceSummary(ctx);
+  const weekly = useWeeklyFieldReports(ctx.projectId);
+  const { user } = useAuth();
+  const canEditWeeklyReports = hasAtLeastRole(user, "SCHEDULER");
 
   return (
     <div>
@@ -616,6 +854,11 @@ export default function FieldDashboard({ initialProjectId, initialVersionId, onO
 
       {data && !loading && (
         <>
+          <WeeklyFieldReportPanel key={ctx.projectId} projectId={ctx.projectId} versions={ctx.versions} reports={weekly.reports}
+            loading={weekly.loading} error={weekly.error} onChanged={weekly.reload}
+            financials={data.financials} manpower={data.manpower} scheduleHealth={data.scheduleHealth}
+            canEdit={canEditWeeklyReports} onOpenIssueRegister={onOpenIssueRegister ? () => onOpenIssueRegister(ctx.projectId, ctx.versionId) : undefined} />
+
           <VarianceCompletionPanel vi={vi.data} loading={vi.loading} error={vi.error} projectId={ctx.projectId} versionId={ctx.versionId}
             onOpenVarianceIntelligence={onOpenVarianceIntelligence} onOpenFloatAnalysis={onOpenFloatAnalysis} />
 

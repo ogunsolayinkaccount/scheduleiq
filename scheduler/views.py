@@ -5655,6 +5655,221 @@ def project_field_dashboard_summary(request, pk):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET/POST   /api/projects/<id>/weekly-field-reports/
+# GET/PATCH  /api/projects/<id>/weekly-field-reports/<report_id>/
+#
+# Weekly Field Operations Review — the one new capability identified by the
+# Field Operations Review Template Assessment. Every value here is a manual
+# entry (see WeeklyFieldReport's own docstring in models.py); nothing is
+# computed by a new engine, and headcount is never derived from P6 resource
+# hours. One row per (project, week_start_date) — creating a new week never
+# touches a prior week's row (unique_together enforces this); editing the
+# current week's row is allowed and is recorded in the existing AuditLog,
+# the same append-only trail Schedule Version deletion already uses.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _serialize_weekly_field_report(report):
+    return {
+        'id': str(report.id), 'projectId': str(report.project_id),
+        'weekStartDate': report.week_start_date.isoformat() if report.week_start_date else None,
+        'scheduleVersionId': str(report.schedule_upload_id) if report.schedule_upload_id else None,
+        'scheduleVersionLabel': (
+            (report.schedule_upload.version_label or report.schedule_upload.original_filename)
+            if report.schedule_upload_id and report.schedule_upload else None
+        ),
+        'actualHeadcount': report.actual_headcount,
+        'nextWeekForecastHeadcount': report.next_week_forecast_headcount,
+        'pmProjectedHeadcount': report.pm_projected_headcount,
+        'monthlyTargetHeadcount': report.monthly_target_headcount,
+        'lastClientUpdateDate': report.last_client_update_date.isoformat() if report.last_client_update_date else None,
+        'createdBy': report.created_by or None, 'createdAt': report.created_at.isoformat(),
+        'updatedBy': report.updated_by or None, 'updatedAt': report.updated_at.isoformat(),
+    }
+
+
+def _parse_optional_nonnegative_int(body, key):
+    """Returns (value, error_message). A present-but-null/blank value clears
+    the field (None); an absent key means "leave unspecified" and is handled
+    by the caller via `key in body`. Never silently floors a negative/non-
+    numeric value — that would misrepresent a real field report."""
+    if body.get(key) in (None, ''):
+        return None, None
+    try:
+        n = int(body[key])
+    except (TypeError, ValueError):
+        return None, f'{key} must be a whole number'
+    if n < 0:
+        return None, f'{key} cannot be negative'
+    return n, None
+
+
+@require_role('VIEWER', POST='SCHEDULER')
+@require_http_methods(['GET', 'POST'])
+def project_weekly_field_reports(request, pk):
+    from django.db import IntegrityError
+    from .models import Project, ScheduleUpload, WeeklyFieldReport
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    if request.method == 'GET':
+        reports = list(WeeklyFieldReport.objects.filter(project=project).select_related('schedule_upload'))
+        return JsonResponse({
+            'projectId': str(project.id),
+            'reports': [_serialize_weekly_field_report(r) for r in reports],
+        })
+
+    # ── POST — create a NEW week's report. Never updates an existing week;
+    # a collision with an already-reported week is refused (409), directing
+    # the caller to PATCH the existing report instead ───────────────────────
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    if not body.get('weekStartDate'):
+        return error_response('weekStartDate is required')
+    try:
+        week_start_date = parse_date(body['weekStartDate'])
+        if week_start_date is None:
+            raise ValueError
+    except Exception:
+        return error_response('weekStartDate could not be parsed. Use YYYY-MM-DD.')
+    # Enforced here AND independently on the frontend (weeklyFieldReportFormat.ts's
+    # mondayOfWeek snap-on-change) — the same defense-in-depth convention this
+    # codebase uses everywhere else; a reporting week always means the same
+    # calendar week regardless of which client sends the request.
+    if week_start_date.weekday() != 0:
+        return error_response('weekStartDate must be a Monday (the start of the reporting week).')
+
+    schedule_upload = None
+    if body.get('scheduleVersionId'):
+        schedule_upload = ScheduleUpload.objects.filter(pk=body['scheduleVersionId'], project=project).first()
+        if not schedule_upload:
+            return error_response('scheduleVersionId does not belong to this project', status=404)
+
+    values = {}
+    for key, field in [
+        ('actualHeadcount', 'actual_headcount'),
+        ('nextWeekForecastHeadcount', 'next_week_forecast_headcount'),
+        ('pmProjectedHeadcount', 'pm_projected_headcount'),
+        ('monthlyTargetHeadcount', 'monthly_target_headcount'),
+    ]:
+        n, err = _parse_optional_nonnegative_int(body, key)
+        if err:
+            return error_response(err)
+        values[field] = n
+
+    last_client_update_date = None
+    if body.get('lastClientUpdateDate'):
+        try:
+            last_client_update_date = parse_date(body['lastClientUpdateDate'])
+            if last_client_update_date is None:
+                raise ValueError
+        except Exception:
+            return error_response('lastClientUpdateDate could not be parsed. Use YYYY-MM-DD.')
+
+    from django.db import transaction
+    try:
+        with transaction.atomic():
+            report = WeeklyFieldReport.objects.create(
+                project=project, schedule_upload=schedule_upload, week_start_date=week_start_date,
+                last_client_update_date=last_client_update_date,
+                created_by=request.user.username, updated_by=request.user.username,
+                **values,
+            )
+    except IntegrityError:
+        return error_response(
+            f'A weekly field report already exists for {week_start_date.isoformat()}. '
+            'Edit the existing report instead of creating a duplicate.',
+            status=409,
+        )
+
+    _write_audit_log(
+        request.user.username, 'CREATE_WEEKLY_FIELD_REPORT', 'WeeklyFieldReport', report.id, outcome='SUCCESS',
+        new_value=_serialize_weekly_field_report(report),
+        request_id=body.get('requestId') or str(uuid.uuid4()),
+    )
+
+    return JsonResponse(_serialize_weekly_field_report(report), status=201)
+
+
+@require_role('VIEWER', PATCH='SCHEDULER')
+@require_http_methods(['GET', 'PATCH'])
+def project_weekly_field_report_detail(request, pk, report_id):
+    from .models import Project, ScheduleUpload, WeeklyFieldReport
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    report = WeeklyFieldReport.objects.filter(pk=report_id, project=project).first()
+    if not report:
+        return error_response('Weekly field report not found', status=404)
+
+    if request.method == 'GET':
+        return JsonResponse(_serialize_weekly_field_report(report))
+
+    # ── PATCH — edit the CURRENT week's report. week_start_date is
+    # deliberately immutable (the row's identity); correcting the wrong
+    # week means filing a new report for the right one, never repointing
+    # an existing row. Recorded in AuditLog either way ───────────────────
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    previous = _serialize_weekly_field_report(report)
+
+    if 'scheduleVersionId' in body:
+        if body['scheduleVersionId']:
+            su = ScheduleUpload.objects.filter(pk=body['scheduleVersionId'], project=project).first()
+            if not su:
+                return error_response('scheduleVersionId does not belong to this project', status=404)
+            report.schedule_upload = su
+        else:
+            report.schedule_upload = None
+
+    for key, field in [
+        ('actualHeadcount', 'actual_headcount'),
+        ('nextWeekForecastHeadcount', 'next_week_forecast_headcount'),
+        ('pmProjectedHeadcount', 'pm_projected_headcount'),
+        ('monthlyTargetHeadcount', 'monthly_target_headcount'),
+    ]:
+        if key in body:
+            n, err = _parse_optional_nonnegative_int(body, key)
+            if err:
+                return error_response(err)
+            setattr(report, field, n)
+
+    if 'lastClientUpdateDate' in body:
+        if body['lastClientUpdateDate']:
+            try:
+                parsed = parse_date(body['lastClientUpdateDate'])
+                if parsed is None:
+                    raise ValueError
+            except Exception:
+                return error_response('lastClientUpdateDate could not be parsed. Use YYYY-MM-DD.')
+            report.last_client_update_date = parsed
+        else:
+            report.last_client_update_date = None
+
+    report.updated_by = request.user.username
+    report.save()
+
+    _write_audit_log(
+        request.user.username, 'UPDATE_WEEKLY_FIELD_REPORT', 'WeeklyFieldReport', report.id, outcome='SUCCESS',
+        previous_value=previous, new_value=_serialize_weekly_field_report(report),
+        request_id=request.GET.get('requestId') or str(uuid.uuid4()),
+    )
+
+    return JsonResponse(_serialize_weekly_field_report(report))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GET /api/projects/<id>/activity-analysis/
 # GET /api/projects/<id>/float-analysis/
 # GET /api/projects/<id>/float-trend/
