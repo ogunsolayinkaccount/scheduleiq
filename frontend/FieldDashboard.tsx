@@ -2,11 +2,13 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useProjectsChangedTick } from "./projectEvents";
 import { sfetch, setProjectScope } from "./projectScope";
 import {
-  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+  ComposedChart, Area, Line, Bar, BarChart, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine,
 } from "recharts";
 import { formatDataDate, versionSelectLabel, dedupeVersionsById } from "./dateFormat";
 import { resolveCompletionStatus, isRegisteredCompletion, completionPanelTitle, buildVarianceIntelligenceUrl } from "./fieldDashboardVarianceFormat";
-import { computeCostUtilizationPercent, formatCostUtilizationPercent, formatHeadcount, mondayOfWeek } from "./weeklyFieldReportFormat";
+import {
+  computeCostUtilizationPercent, formatCostUtilizationPercent, formatHeadcount, mondayOfWeek, computeForecastAccuracy,
+} from "./weeklyFieldReportFormat";
 import { useAuth, hasAtLeastRole } from "./AuthContext";
 
 const C = {
@@ -699,13 +701,266 @@ function WeeklyFieldReportForm({ projectId, versions, initial, onSaved, onCancel
   );
 }
 
+// ─── Excel import ───────────────────────────────────────────────────────────
+// A faster INPUT METHOD for the exact same WeeklyFieldReport rows the form
+// above creates — never a second weekly-report model or a new validation
+// engine. Every row is validated server-side by the identical function the
+// manual form's POST uses; this component only drives the preview →
+// explicit confirmation → commit flow and renders what the server decided.
+
+const IMPORT_ROW_STATUS_COLOR: Record<string, string> = { VALID: C.green, DUPLICATE: C.amber, INVALID: C.red };
+
+function WeeklyFieldReportImportForm({ projectId, onImported, onCancel }: {
+  projectId: string; onImported: () => void; onCancel: () => void;
+}) {
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<any>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [skipped, setSkipped] = useState<Set<number>>(new Set());
+  const [confirmNoIdentifier, setConfirmNoIdentifier] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importResult, setImportResult] = useState<{ imported: number } | null>(null);
+
+  const runPreview = (file: File) => {
+    setPreviewing(true); setPreviewError(null); setPreview(null);
+    setSkipped(new Set()); setConfirmNoIdentifier(false); setImportResult(null); setImportError(null);
+    const fd = new FormData();
+    fd.append("file", file);
+    fetch(`${API}/api/projects/${projectId}/weekly-field-reports/import-preview/`, { method: "POST", body: fd })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t); return JSON.parse(t); })
+      .then(setPreview)
+      .catch((e: any) => { try { setPreviewError(JSON.parse(e.message).error || e.message); } catch { setPreviewError(e.message || String(e)); } })
+      .finally(() => setPreviewing(false));
+  };
+
+  const toggleSkip = (rowNumber: number) => {
+    setSkipped(prev => {
+      const next = new Set(prev);
+      if (next.has(rowNumber)) next.delete(rowNumber); else next.add(rowNumber);
+      return next;
+    });
+  };
+
+  const rows: any[] = preview?.rows || [];
+  const problemRows = rows.filter(r => r.status !== "VALID");
+  const allProblemsResolved = problemRows.every(r => skipped.has(r.rowNumber));
+  const identityBlocked = preview?.projectIdentity?.status === "MISMATCHED";
+  const needsIdentityConfirmation = preview?.projectIdentity?.status === "NOT_PRESENT" && !confirmNoIdentifier;
+  const rowsToImport = rows.filter(r => r.status === "VALID" && !skipped.has(r.rowNumber));
+  const canConfirm = !!preview && !identityBlocked && allProblemsResolved && !needsIdentityConfirmation && rowsToImport.length > 0;
+
+  const doImport = () => {
+    if (!canConfirm) return;
+    setImporting(true); setImportError(null);
+    fetch(`${API}/api/projects/${projectId}/weekly-field-reports/import-commit/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmProjectId: projectId, sourceFileName: preview.fileName,
+        confirmNoProjectIdentifier: confirmNoIdentifier, rows: rowsToImport,
+      }),
+    })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t); return JSON.parse(t); })
+      .then((result: any) => { setImportResult(result); onImported(); })
+      .catch((e: any) => { try { setImportError(JSON.parse(e.message).error || e.message); } catch { setImportError(e.message || String(e)); } })
+      .finally(() => setImporting(false));
+  };
+
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12, marginBottom: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: C.text, marginBottom: 8 }}>Import Weekly Reports from Excel</div>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+        One row per reporting week. Supports .xlsx only. Every row is validated exactly like the manual form above — nothing is imported until you confirm.
+      </div>
+
+      {!importResult && (
+        <input type="file" accept=".xlsx" onChange={e => { const f = e.target.files?.[0]; if (f) runPreview(f); }}
+          style={{ marginBottom: 10, fontSize: 12, fontFamily: "inherit" }} />
+      )}
+
+      {previewing && <div style={{ color: C.accent, fontSize: 12, marginBottom: 8 }}>Reading workbook…</div>}
+      {previewError && <div style={{ color: C.red, fontSize: 12, marginBottom: 8 }}>{previewError}</div>}
+
+      {importResult && (
+        <div style={{ color: C.green, fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
+          Imported {importResult.imported} weekly report{importResult.imported === 1 ? "" : "s"}.
+        </div>
+      )}
+
+      {preview && !importResult && (
+        <>
+          <div style={{
+            background: identityBlocked ? `${C.red}12` : preview.projectIdentity.status === "NOT_PRESENT" ? `${C.gold}12` : `${C.green}12`,
+            border: `1px solid ${identityBlocked ? C.red : preview.projectIdentity.status === "NOT_PRESENT" ? C.gold : C.green}40`,
+            borderRadius: 6, padding: "8px 10px", marginBottom: 10, fontSize: 12, color: C.text,
+          }}>
+            <strong>Project identity: {preview.projectIdentity.status}.</strong>{" "}
+            {preview.projectIdentity.reason || "The workbook's stated project matches the selected project."}
+            {preview.projectIdentity.status === "NOT_PRESENT" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 11 }}>
+                <input type="checkbox" checked={confirmNoIdentifier} onChange={e => setConfirmNoIdentifier(e.target.checked)} />
+                I confirm this workbook's data belongs to the selected project ({preview.projectIdentity.selectedProjectName}).
+              </label>
+            )}
+          </div>
+
+          {!identityBlocked && (
+            <>
+              <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+                {preview.summary.validCount} valid · {preview.summary.duplicateCount} duplicate · {preview.summary.invalidCount} invalid
+                {preview.unmappedColumns.length > 0 && ` · unrecognized columns: ${preview.unmappedColumns.join(", ")}`}
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, marginBottom: 10 }}>
+                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10, textTransform: "uppercase" }}>
+                  <th style={{ padding: "3px 6px" }}>Row</th>
+                  <th style={{ padding: "3px 6px" }}>Week</th>
+                  <th style={{ padding: "3px 6px" }}>Actual</th>
+                  <th style={{ padding: "3px 6px" }}>Forecast</th>
+                  <th style={{ padding: "3px 6px" }}>PM Proj.</th>
+                  <th style={{ padding: "3px 6px" }}>Target</th>
+                  <th style={{ padding: "3px 6px" }}>Status</th>
+                  <th style={{ padding: "3px 6px" }}></th>
+                </tr></thead>
+                <tbody>
+                  {rows.map(r => (
+                    <tr key={r.rowNumber} style={{ borderTop: `1px solid ${C.border}`, opacity: r.status !== "VALID" && skipped.has(r.rowNumber) ? 0.5 : 1 }}>
+                      <td style={{ padding: "3px 6px" }}>{r.rowNumber}</td>
+                      <td style={{ padding: "3px 6px" }}>{r.weekStartDate ?? "—"}</td>
+                      <td style={{ padding: "3px 6px" }}>{r.actualHeadcount ?? "—"}</td>
+                      <td style={{ padding: "3px 6px" }}>{r.nextWeekForecastHeadcount ?? "—"}</td>
+                      <td style={{ padding: "3px 6px" }}>{r.pmProjectedHeadcount ?? "—"}</td>
+                      <td style={{ padding: "3px 6px" }}>{r.monthlyTargetHeadcount ?? "—"}</td>
+                      <td style={{ padding: "3px 6px" }}>
+                        <span style={{ background: `${IMPORT_ROW_STATUS_COLOR[r.status]}18`, color: IMPORT_ROW_STATUS_COLOR[r.status], borderRadius: 5, padding: "2px 7px", fontSize: 10, fontWeight: 700 }}>{r.status}</span>
+                        {r.errors?.length > 0 && <div style={{ color: C.muted2, fontSize: 10 }}>{r.errors.join("; ")}</div>}
+                      </td>
+                      <td style={{ padding: "3px 6px" }}>
+                        {r.status !== "VALID" && (
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: C.muted }}>
+                            <input type="checkbox" checked={skipped.has(r.rowNumber)} onChange={() => toggleSkip(r.rowNumber)} /> Skip
+                          </label>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!allProblemsResolved && (
+                <div style={{ color: C.gold, fontSize: 11, marginBottom: 10 }}>
+                  Check "Skip" for every duplicate/invalid row above before confirming — correct the workbook and re-upload instead if you'd rather fix a value.
+                </div>
+              )}
+            </>
+          )}
+
+          {importError && <div style={{ color: C.red, fontSize: 12, marginBottom: 8 }}>{importError}</div>}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={doImport} disabled={!canConfirm || importing}
+              style={{ background: canConfirm ? C.accent : C.muted2, color: "#fff", border: "none", borderRadius: 6, padding: "6px 12px", cursor: canConfirm ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>
+              {importing ? "Importing…" : `Confirm Import (${rowsToImport.length})`}
+            </button>
+            <button onClick={onCancel} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>
+              {importResult ? "Done" : "Cancel"}
+            </button>
+          </div>
+        </>
+      )}
+      {!preview && (
+        <button onClick={onCancel} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Cancel</button>
+      )}
+    </div>
+  );
+}
+
+// ─── Charts ─────────────────────────────────────────────────────────────────
+
+function WeeklyManpowerTrendChart({ reports }: { reports: any[] }) {
+  const chronological = [...reports].sort((a, b) => a.weekStartDate.localeCompare(b.weekStartDate));
+  if (chronological.length < 2) {
+    return <Unavailable reason="At least two weekly reports are needed to plot a trend." />;
+  }
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <ComposedChart data={chronological} margin={{ left: -10 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+        <XAxis dataKey="weekStartDate" tick={{ fill: C.muted, fontSize: 10 }} tickFormatter={(v: string) => formatDataDate(v)} />
+        <YAxis tick={{ fill: C.muted, fontSize: 10 }} allowDecimals={false} />
+        <Tooltip labelFormatter={(v: string) => `Week of ${formatDataDate(v)}`} />
+        <Legend iconSize={9} wrapperStyle={{ fontSize: 10 }} />
+        <Line type="monotone" dataKey="actualHeadcount" name="Actual (Field Verified)" stroke={C.green} strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+        <Line type="monotone" dataKey="nextWeekForecastHeadcount" name="Next-Week Forecast" stroke={C.amber} strokeWidth={2} strokeDasharray="5 3" dot={{ r: 3 }} connectNulls={false} />
+        <Line type="monotone" dataKey="pmProjectedHeadcount" name="PM Projection" stroke={C.purple} strokeWidth={2} strokeDasharray="2 2" dot={{ r: 3 }} connectNulls={false} />
+        <Line type="monotone" dataKey="monthlyTargetHeadcount" name="Monthly Target" stroke={C.muted2} strokeWidth={2} strokeDasharray="1 4" dot={false} connectNulls={false} />
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+}
+
+// Sign convention (also documented on ForecastAccuracyPoint in
+// weeklyFieldReportFormat.ts): positive = UNDER-forecast (actual exceeded
+// plan); negative = OVER-forecast (actual fell short of plan); zero =
+// exact match. Shown as the PRIMARY bar metric (errorPercent) so a large
+// miss reads as a signed, directional number — never as a confusing
+// negative "accuracy."
+function forecastDirectionLabel(varianceHeadcount: number): string {
+  if (varianceHeadcount > 0) return "under-forecasted";
+  if (varianceHeadcount < 0) return "over-forecasted";
+  return "exact match";
+}
+
+function ForecastAccuracyTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div style={{ background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
+      <div style={{ color: C.text, fontWeight: 700, marginBottom: 4 }}>Forecast (week of {formatDataDate(p.forecastWeek)}): {p.forecastHeadcount}</div>
+      <div style={{ color: C.text, marginBottom: 4 }}>Actual (week of {formatDataDate(p.actualWeek)}): {p.actualHeadcount}</div>
+      <div style={{ color: p.varianceHeadcount > 0 ? C.amber : p.varianceHeadcount < 0 ? C.red : C.green, fontWeight: 700 }}>
+        Variance: {p.varianceHeadcount > 0 ? "+" : ""}{p.varianceHeadcount} workers ({forecastDirectionLabel(p.varianceHeadcount)})
+      </div>
+      <div style={{ color: C.muted2 }}>Forecast Error: {p.errorPercent == null ? "Unavailable" : `${p.errorPercent > 0 ? "+" : ""}${p.errorPercent}%`}</div>
+      <div style={{ color: C.muted2 }}>Accuracy: {p.accuracyPercent == null ? "Unavailable" : `${p.accuracyPercent}%`} (bounded 0–100%, never negative)</div>
+    </div>
+  );
+}
+
+function ForecastAccuracyChart({ reports }: { reports: any[] }) {
+  const points = computeForecastAccuracy(reports);
+  if (points.length === 0) {
+    return <Unavailable reason="No consecutive weeks with both a next-week forecast and a verified following-week actual yet." />;
+  }
+  return (
+    <>
+      <div style={{ fontSize: 10, color: C.muted2, marginBottom: 6 }}>
+        Forecast Error % = (Actual − Forecast) ÷ Forecast × 100 — positive means under-forecasted, negative means over-forecasted. Missing or non-consecutive weeks are omitted, never approximated.
+      </div>
+      <ResponsiveContainer width="100%" height={200}>
+        <BarChart data={points} margin={{ left: -10 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+          <XAxis dataKey="actualWeek" tick={{ fill: C.muted, fontSize: 10 }} tickFormatter={(v: string) => formatDataDate(v)} />
+          <YAxis tick={{ fill: C.muted, fontSize: 10 }} unit="%" />
+          <Tooltip content={<ForecastAccuracyTooltip />} />
+          <ReferenceLine y={0} stroke={C.muted2} />
+          <Bar dataKey="errorPercent" name="Forecast Error %">
+            {points.map((p, i) => {
+              const mag = p.errorPercent == null ? null : Math.abs(p.errorPercent);
+              return <Cell key={i} fill={mag == null ? C.muted2 : mag <= 10 ? C.green : mag <= 25 ? C.amber : C.red} />;
+            })}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </>
+  );
+}
+
 function WeeklyFieldReportPanel({ projectId, versions, reports, loading, error, onChanged, financials, manpower, scheduleHealth, canEdit, onOpenIssueRegister }: {
   projectId: string; versions: any[]; reports: any[]; loading: boolean; error: string | null; onChanged: () => void;
   financials: any; manpower: any; scheduleHealth: any; canEdit: boolean; onOpenIssueRegister?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedId, setSelectedId] = useState("");
-  const [formMode, setFormMode] = useState<"none" | "create" | "edit">("none");
+  const [formMode, setFormMode] = useState<"none" | "create" | "edit" | "import">("none");
 
   const latest = reports[0];
   const selected = reports.find(r => r.id === selectedId) || latest;
@@ -747,9 +1002,14 @@ function WeeklyFieldReportPanel({ projectId, versions, reports, loading, error, 
           )}
 
           {formMode === "none" && canEdit && (
-            <button onClick={() => setFormMode("create")} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit", marginBottom: 12 }}>
-              + New Weekly Report
-            </button>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button onClick={() => setFormMode("create")} style={{ background: C.accent, color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>
+                + New Weekly Report
+              </button>
+              <button onClick={() => setFormMode("import")} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.accent, borderRadius: 7, padding: "7px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>
+                Import Excel
+              </button>
+            </div>
           )}
           {formMode === "create" && (
             <WeeklyFieldReportForm projectId={projectId} versions={versions} initial={null}
@@ -758,6 +1018,9 @@ function WeeklyFieldReportPanel({ projectId, versions, reports, loading, error, 
           {formMode === "edit" && selected && (
             <WeeklyFieldReportForm projectId={projectId} versions={versions} initial={selected}
               onSaved={() => { setFormMode("none"); onChanged(); }} onCancel={() => setFormMode("none")} />
+          )}
+          {formMode === "import" && (
+            <WeeklyFieldReportImportForm projectId={projectId} onImported={onChanged} onCancel={() => setFormMode("none")} />
           )}
 
           {!reports.length && formMode === "none" ? (
@@ -781,6 +1044,17 @@ function WeeklyFieldReportPanel({ projectId, versions, reports, loading, error, 
                   Critical/Driving Path: {scheduleHealth.criticalCount} critical · {scheduleHealth.drivingCount} driving · {scheduleHealth.negativeFloatCount} with negative float — see Schedule Health below for detail.
                 </div>
               )}
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.text, marginBottom: 6 }}>Weekly Manpower Trend</div>
+                  <WeeklyManpowerTrendChart reports={reports} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.text, marginBottom: 6 }}>Manpower Forecast Accuracy</div>
+                  <ForecastAccuracyChart reports={reports} />
+                </div>
+              </div>
 
               <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 10, color: C.muted2 }}>

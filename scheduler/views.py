@@ -66,6 +66,7 @@ from . import schedule_identity
 from . import contractual_milestones
 from . import issue_register
 from . import variance_intelligence
+from . import weekly_field_report_import
 
 
 def serialize_date(value):
@@ -5703,6 +5704,67 @@ def _parse_optional_nonnegative_int(body, key):
     return n, None
 
 
+_WEEKLY_REPORT_HEADCOUNT_FIELDS = [
+    ('actualHeadcount', 'actual_headcount'),
+    ('nextWeekForecastHeadcount', 'next_week_forecast_headcount'),
+    ('pmProjectedHeadcount', 'pm_projected_headcount'),
+    ('monthlyTargetHeadcount', 'monthly_target_headcount'),
+]
+
+
+def _validate_weekly_report_row(body):
+    """
+    The ONE validation path for a weekly field report row — used by the
+    single-row POST below AND by the Excel bulk importer, so a row
+    uploaded via a spreadsheet is held to exactly the same rules as one
+    typed into the form (Monday-start weeks, non-negative headcounts,
+    parseable dates). Never duplicated, never loosened for either caller.
+
+    Returns (cleaned: dict | None, errors: list[str]). `cleaned` has
+    `week_start_date`/`last_client_update_date` as real `date` objects
+    (or None) and the four headcount fields as int-or-None — ready to pass
+    straight into WeeklyFieldReport.objects.create()/field assignment.
+    """
+    errors = []
+
+    if not body.get('weekStartDate'):
+        errors.append('weekStartDate is required')
+        week_start_date = None
+    else:
+        try:
+            week_start_date = parse_date(body['weekStartDate'])
+            if week_start_date is None:
+                raise ValueError
+        except Exception:
+            week_start_date = None
+            errors.append('weekStartDate could not be parsed. Use YYYY-MM-DD.')
+        if week_start_date is not None and week_start_date.weekday() != 0:
+            errors.append('weekStartDate must be a Monday (the start of the reporting week).')
+
+    values = {}
+    for key, field in _WEEKLY_REPORT_HEADCOUNT_FIELDS:
+        n, err = _parse_optional_nonnegative_int(body, key)
+        if err:
+            errors.append(err)
+        values[field] = n
+
+    last_client_update_date = None
+    if body.get('lastClientUpdateDate'):
+        try:
+            last_client_update_date = parse_date(body['lastClientUpdateDate'])
+            if last_client_update_date is None:
+                raise ValueError
+        except Exception:
+            errors.append('lastClientUpdateDate could not be parsed. Use YYYY-MM-DD.')
+
+    if errors:
+        return None, errors
+
+    return {
+        'week_start_date': week_start_date, 'last_client_update_date': last_client_update_date, **values,
+    }, []
+
+
 @require_role('VIEWER', POST='SCHEDULER')
 @require_http_methods(['GET', 'POST'])
 def project_weekly_field_reports(request, pk):
@@ -5729,20 +5791,10 @@ def project_weekly_field_reports(request, pk):
     except json.JSONDecodeError:
         return error_response('Request body must be valid JSON')
 
-    if not body.get('weekStartDate'):
-        return error_response('weekStartDate is required')
-    try:
-        week_start_date = parse_date(body['weekStartDate'])
-        if week_start_date is None:
-            raise ValueError
-    except Exception:
-        return error_response('weekStartDate could not be parsed. Use YYYY-MM-DD.')
-    # Enforced here AND independently on the frontend (weeklyFieldReportFormat.ts's
-    # mondayOfWeek snap-on-change) — the same defense-in-depth convention this
-    # codebase uses everywhere else; a reporting week always means the same
-    # calendar week regardless of which client sends the request.
-    if week_start_date.weekday() != 0:
-        return error_response('weekStartDate must be a Monday (the start of the reporting week).')
+    cleaned, errors = _validate_weekly_report_row(body)
+    if errors:
+        return error_response(errors[0])
+    week_start_date = cleaned['week_start_date']
 
     schedule_upload = None
     if body.get('scheduleVersionId'):
@@ -5750,35 +5802,15 @@ def project_weekly_field_reports(request, pk):
         if not schedule_upload:
             return error_response('scheduleVersionId does not belong to this project', status=404)
 
-    values = {}
-    for key, field in [
-        ('actualHeadcount', 'actual_headcount'),
-        ('nextWeekForecastHeadcount', 'next_week_forecast_headcount'),
-        ('pmProjectedHeadcount', 'pm_projected_headcount'),
-        ('monthlyTargetHeadcount', 'monthly_target_headcount'),
-    ]:
-        n, err = _parse_optional_nonnegative_int(body, key)
-        if err:
-            return error_response(err)
-        values[field] = n
-
-    last_client_update_date = None
-    if body.get('lastClientUpdateDate'):
-        try:
-            last_client_update_date = parse_date(body['lastClientUpdateDate'])
-            if last_client_update_date is None:
-                raise ValueError
-        except Exception:
-            return error_response('lastClientUpdateDate could not be parsed. Use YYYY-MM-DD.')
-
     from django.db import transaction
     try:
         with transaction.atomic():
             report = WeeklyFieldReport.objects.create(
-                project=project, schedule_upload=schedule_upload, week_start_date=week_start_date,
-                last_client_update_date=last_client_update_date,
+                project=project, schedule_upload=schedule_upload,
+                week_start_date=week_start_date, last_client_update_date=cleaned['last_client_update_date'],
+                actual_headcount=cleaned['actual_headcount'], next_week_forecast_headcount=cleaned['next_week_forecast_headcount'],
+                pm_projected_headcount=cleaned['pm_projected_headcount'], monthly_target_headcount=cleaned['monthly_target_headcount'],
                 created_by=request.user.username, updated_by=request.user.username,
-                **values,
             )
     except IntegrityError:
         return error_response(
@@ -5867,6 +5899,281 @@ def project_weekly_field_report_detail(request, pk, report_id):
     )
 
     return JsonResponse(_serialize_weekly_field_report(report))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/projects/<id>/weekly-field-reports/import-preview/
+# POST /api/projects/<id>/weekly-field-reports/import-commit/
+#
+# Weekly Field Report Excel import — a faster INPUT METHOD for the exact
+# same WeeklyFieldReport rows the manual form already creates, not a new
+# data source or a second weekly-report model. Every row a workbook
+# produces is validated by the SAME _validate_weekly_report_row() the
+# single-row POST above uses. Scope is deliberately narrow: this reads
+# weekly REPORTING rows, not an arbitrary workbook structure (see
+# weekly_field_report_mapping.py / weekly_field_report_import.py).
+# ─────────────────────────────────────────────────────────────────────────────
+
+MAX_WEEKLY_REPORT_IMPORT_MB = 5  # a weekly report workbook is tiny — not a schedule-file-sized limit.
+
+
+def _normalize_identity_value(value):
+    return (value or '').strip().lower()
+
+
+def _weekly_report_project_identity_candidates(project):
+    """Every string this project could legitimately be called in a
+    workbook's Project ID column — its stable UUID, its business-facing
+    project_number, and its display name. Never a fuzzy/partial match."""
+    candidates = {str(project.id), project.project_number, project.name}
+    return {_normalize_identity_value(c) for c in candidates if c}
+
+
+def _check_weekly_report_project_identity(project, rows):
+    """
+    Classifies the workbook's stated project identity against the
+    SELECTED project (never the reverse — the destination is always
+    chosen by the user first, exactly like every other import path in
+    this codebase).
+
+    MATCHED        — every row that states an identity agrees with the
+                      selected project. Import proceeds normally.
+    MISMATCHED     — at least one row states a DIFFERENT identity. Hard
+                      block — no override exists for this case (Review
+                      safeguard #1: never mix two projects' data).
+    NOT_PRESENT    — no row states any identity at all (column missing or
+                      entirely blank). Soft block — the caller must set
+                      confirmNoProjectIdentifier=true to proceed.
+    """
+    stated = sorted({r['projectIdRaw'] for r in rows if r.get('projectIdRaw')})
+    if not stated:
+        return {
+            'status': 'NOT_PRESENT', 'statedValues': [],
+            'reason': 'This workbook has no Project ID column (or it is blank in every row) — explicit confirmation is required before import.',
+        }
+    valid = _weekly_report_project_identity_candidates(project)
+    mismatched = [v for v in stated if _normalize_identity_value(v) not in valid]
+    if mismatched:
+        return {
+            'status': 'MISMATCHED', 'statedValues': stated,
+            'reason': (
+                f'This workbook references a different project ({", ".join(mismatched[:5])}) '
+                f'than the selected project ({project.name}). Import blocked — no override is available for a project mismatch.'
+            ),
+        }
+    return {'status': 'MATCHED', 'statedValues': stated, 'reason': None}
+
+
+def _display_weekly_report_import_row(raw_row, cleaned, errors, status):
+    # `projectIdRaw` is echoed back on every row (valid or not) so the
+    # frontend can pass each row straight through, unmodified, to the
+    # commit endpoint — which re-derives project identity from THESE
+    # values again rather than trusting whatever the preview concluded.
+    if cleaned:
+        return {
+            'rowNumber': raw_row['rowNumber'], 'status': status, 'errors': errors,
+            'projectIdRaw': raw_row.get('projectIdRaw'),
+            'weekStartDate': cleaned['week_start_date'].isoformat(),
+            'actualHeadcount': cleaned['actual_headcount'],
+            'nextWeekForecastHeadcount': cleaned['next_week_forecast_headcount'],
+            'pmProjectedHeadcount': cleaned['pm_projected_headcount'],
+            'monthlyTargetHeadcount': cleaned['monthly_target_headcount'],
+            'lastClientUpdateDate': cleaned['last_client_update_date'].isoformat() if cleaned['last_client_update_date'] else None,
+        }
+    return {
+        'rowNumber': raw_row['rowNumber'], 'status': status, 'errors': errors,
+        'projectIdRaw': raw_row.get('projectIdRaw'),
+        'weekStartDate': raw_row.get('weekStartDate'),
+        'actualHeadcount': raw_row.get('actualHeadcount'),
+        'nextWeekForecastHeadcount': raw_row.get('nextWeekForecastHeadcount'),
+        'pmProjectedHeadcount': raw_row.get('pmProjectedHeadcount'),
+        'monthlyTargetHeadcount': raw_row.get('monthlyTargetHeadcount'),
+        'lastClientUpdateDate': raw_row.get('lastClientUpdateDate'),
+    }
+
+
+@require_role('SCHEDULER')
+@require_POST
+def project_weekly_field_report_import_preview(request, pk):
+    from .models import Project, WeeklyFieldReport
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    upload_file = request.FILES.get('file')
+    if not upload_file:
+        return error_response('No file uploaded. Field name must be "file".')
+    if upload_file.size > MAX_WEEKLY_REPORT_IMPORT_MB * 1024 * 1024:
+        return error_response(
+            f'File too large ({upload_file.size // (1024*1024)} MB). '
+            f'Maximum allowed size is {MAX_WEEKLY_REPORT_IMPORT_MB} MB for a weekly field report workbook.',
+            status=413,
+        )
+    extension = os.path.splitext(upload_file.name)[1].lower()
+    if extension != '.xlsx':
+        return error_response('Only .xlsx workbooks are supported for Weekly Field Report import.')
+
+    try:
+        df = load_table_from_excel(upload_file, engine='openpyxl')
+    except Exception as exc:
+        return error_response(f'Could not read this workbook: {exc}')
+    if df is None or df.empty:
+        return error_response('This workbook has no data rows.')
+    if len(df) > weekly_field_report_import.MAX_IMPORT_ROWS:
+        return error_response(
+            f'This workbook has {len(df)} rows — the maximum supported in one import is '
+            f'{weekly_field_report_import.MAX_IMPORT_ROWS} (about 10 years of weekly reports).',
+        )
+
+    extraction = weekly_field_report_import.extract_weekly_report_rows(df)
+    identity = _check_weekly_report_project_identity(project, extraction['rows'])
+
+    existing_weeks = {
+        d.isoformat() for d in WeeklyFieldReport.objects.filter(project=project).values_list('week_start_date', flat=True)
+    }
+    seen_in_batch = set()
+    preview_rows = []
+    for raw_row in extraction['rows']:
+        cleaned, errors = _validate_weekly_report_row(raw_row)
+        status = 'VALID'
+        if errors:
+            status = 'INVALID'
+        else:
+            iso = cleaned['week_start_date'].isoformat()
+            if iso in existing_weeks:
+                status, errors = 'DUPLICATE', [f'A weekly field report already exists for {iso}.']
+            elif iso in seen_in_batch:
+                status, errors = 'DUPLICATE', [f'Duplicate week {iso} appears more than once in this workbook.']
+            else:
+                seen_in_batch.add(iso)
+        preview_rows.append(_display_weekly_report_import_row(raw_row, cleaned, errors, status))
+
+    summary = {
+        'validCount': sum(1 for r in preview_rows if r['status'] == 'VALID'),
+        'duplicateCount': sum(1 for r in preview_rows if r['status'] == 'DUPLICATE'),
+        'invalidCount': sum(1 for r in preview_rows if r['status'] == 'INVALID'),
+    }
+
+    return JsonResponse({
+        'fileName': upload_file.name,
+        'rowCount': extraction['rowCount'],
+        'mappedFields': extraction['mappedFields'],
+        'unmappedColumns': extraction['unmappedColumns'],
+        'projectIdentity': {
+            **identity, 'selectedProjectId': str(project.id), 'selectedProjectName': project.name,
+        },
+        'rows': preview_rows,
+        'summary': summary,
+        'canImport': identity['status'] != 'MISMATCHED' and summary['validCount'] > 0,
+    })
+
+
+@require_role('SCHEDULER')
+@require_POST
+def project_weekly_field_report_import_commit(request, pk):
+    from django.db import IntegrityError, transaction
+    from .models import Project, ScheduleUpload, WeeklyFieldReport
+
+    try:
+        project = Project.objects.get(pk=pk)
+    except Exception:
+        return error_response('Project not found', status=404)
+
+    try:
+        body = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return error_response('Request body must be valid JSON')
+
+    if body.get('confirmProjectId') != str(project.id):
+        return error_response('confirmProjectId must match the project being imported into.')
+
+    rows = body.get('rows')
+    if not isinstance(rows, list) or not rows:
+        return error_response('rows must be a non-empty list.')
+    if len(rows) > weekly_field_report_import.MAX_IMPORT_ROWS:
+        return error_response(f'Too many rows (max {weekly_field_report_import.MAX_IMPORT_ROWS} per import).')
+
+    # Re-derived from the submitted rows themselves — never trust a
+    # client-side-only "identity already confirmed" claim. A genuine
+    # mismatch has no override; NOT_PRESENT requires the explicit flag.
+    identity = _check_weekly_report_project_identity(project, rows)
+    if identity['status'] == 'MISMATCHED':
+        return error_response(identity['reason'], status=409)
+    if identity['status'] == 'NOT_PRESENT' and not body.get('confirmNoProjectIdentifier'):
+        return error_response(
+            'This workbook has no Project ID column. Set confirmNoProjectIdentifier to confirm this '
+            'data belongs to the selected project before importing.',
+        )
+
+    source_file_name = str(body.get('sourceFileName') or 'import.xlsx')[:500]
+
+    existing_weeks = {
+        d.isoformat() for d in WeeklyFieldReport.objects.filter(project=project).values_list('week_start_date', flat=True)
+    }
+    seen_in_batch = set()
+    to_create = []
+    row_errors = []
+    for row in rows:
+        cleaned, errors = _validate_weekly_report_row(row)
+        if errors:
+            row_errors.append({'rowNumber': row.get('rowNumber'), 'errors': errors})
+            continue
+        iso = cleaned['week_start_date'].isoformat()
+        if iso in existing_weeks:
+            row_errors.append({'rowNumber': row.get('rowNumber'), 'errors': [f'A weekly field report already exists for {iso}.']})
+            continue
+        if iso in seen_in_batch:
+            row_errors.append({'rowNumber': row.get('rowNumber'), 'errors': [f'Duplicate week {iso} appears more than once in this import.']})
+            continue
+        seen_in_batch.add(iso)
+        schedule_upload = None
+        if row.get('scheduleVersionId'):
+            schedule_upload = ScheduleUpload.objects.filter(pk=row['scheduleVersionId'], project=project).first()
+            if not schedule_upload:
+                row_errors.append({'rowNumber': row.get('rowNumber'), 'errors': ['scheduleVersionId does not belong to this project.']})
+                continue
+        to_create.append((cleaned, schedule_upload, row.get('rowNumber')))
+
+    # All-or-nothing: ANY row failing re-validation blocks the ENTIRE
+    # import — no row is saved (Review safeguard #2).
+    if row_errors:
+        return JsonResponse(
+            {'imported': 0, 'rowErrors': row_errors, 'error': 'Import blocked — one or more rows failed validation. No rows were saved.'},
+            status=400,
+        )
+
+    created = []
+    try:
+        with transaction.atomic():
+            for cleaned, schedule_upload, _row_number in to_create:
+                report = WeeklyFieldReport.objects.create(
+                    project=project, schedule_upload=schedule_upload,
+                    week_start_date=cleaned['week_start_date'], last_client_update_date=cleaned['last_client_update_date'],
+                    actual_headcount=cleaned['actual_headcount'], next_week_forecast_headcount=cleaned['next_week_forecast_headcount'],
+                    pm_projected_headcount=cleaned['pm_projected_headcount'], monthly_target_headcount=cleaned['monthly_target_headcount'],
+                    created_by=request.user.username, updated_by=request.user.username,
+                )
+                created.append(report)
+    except IntegrityError:
+        # A race against a concurrent create for the same week — the whole
+        # batch rolls back automatically inside transaction.atomic() above;
+        # nothing from this import is left partially saved.
+        return error_response(
+            'One or more weeks in this import were created by another request while it was running. '
+            'No rows were saved — review the current reports and retry.',
+            status=409,
+        )
+
+    for report in created:
+        _write_audit_log(
+            request.user.username, 'CREATE_WEEKLY_FIELD_REPORT', 'WeeklyFieldReport', report.id, outcome='SUCCESS',
+            new_value=_serialize_weekly_field_report(report),
+            reason=f'Imported from Excel workbook "{source_file_name}"',
+        )
+
+    return JsonResponse({'imported': len(created), 'reports': [_serialize_weekly_field_report(r) for r in created]}, status=201)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

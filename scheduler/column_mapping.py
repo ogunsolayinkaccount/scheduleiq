@@ -88,12 +88,20 @@ DATE_FIELD_KEYS = {
 }
 
 
-def detect_columns(columns: List[str]) -> Dict[str, str]:
+def detect_columns(columns: List[str], field_synonyms: Optional[Dict[str, List[str]]] = None) -> Dict[str, str]:
     """
     Map canonical field -> source column name, choosing the best (longest
     synonym match) source column per field. Each source column is used for
     at most one field.
+
+    `field_synonyms` defaults to this module's own schedule-activity
+    vocabulary (FIELD_SYNONYMS) — passing a different table (e.g. the
+    Weekly Field Report importer's headcount/forecast vocabulary in
+    weekly_field_report_mapping.py) reuses this exact same matching
+    algorithm for an entirely different field set, rather than
+    duplicating it.
     """
+    field_synonyms = field_synonyms if field_synonyms is not None else FIELD_SYNONYMS
     norm_cols = [(c, normalize_key(c)) for c in columns]
     mapped: Dict[str, str] = {}
     used_columns: set = set()
@@ -101,7 +109,7 @@ def detect_columns(columns: List[str]) -> Dict[str, str]:
     # Build (field, synonym_len, synonym, source_col) candidates, longest synonyms first
     # so e.g. "baseline_start" beats "start" for a column named "Baseline Start".
     candidates = []
-    for field, synonyms in FIELD_SYNONYMS.items():
+    for field, synonyms in field_synonyms.items():
         for syn in synonyms:
             for orig, norm in norm_cols:
                 if orig in used_columns:

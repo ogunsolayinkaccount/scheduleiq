@@ -52,3 +52,74 @@ export function mondayOfWeek(dateStr: string): string {
 export function isMonday(dateStr: string): boolean {
   return mondayOfWeek(dateStr) === dateStr;
 }
+
+export type WeeklyReportHistoryRow = {
+  weekStartDate: string;
+  actualHeadcount: number | null;
+  nextWeekForecastHeadcount: number | null;
+};
+
+export type ForecastAccuracyPoint = {
+  forecastWeek: string; actualWeek: string;
+  forecastHeadcount: number; actualHeadcount: number;
+  // actual − forecast, in workers. Sign convention: POSITIVE means actual
+  // headcount EXCEEDED the forecast (the forecast was too LOW — an
+  // under-forecast); NEGATIVE means actual came in BELOW the forecast (the
+  // forecast was too HIGH — an over-forecast); zero is an exact match.
+  varianceHeadcount: number;
+  // (actual − forecast) / forecast × 100 — same sign convention as
+  // varianceHeadcount above. null only when the forecast itself was 0
+  // (division is undefined, never shown as a fabricated 0% or Infinity).
+  errorPercent: number | null;
+  // 100 − |errorPercent|, FLOORED at 0 — never negative. A large miss
+  // (error magnitude ≥ 100%) reads as 0%, not as a confusing negative
+  // number; errorPercent is the primary, signed metric for over/under-
+  // forecasting — accuracyPercent is a secondary, bounded-for-display one.
+  accuracyPercent: number | null;
+};
+
+/**
+ * Forecast accuracy = how close week N's "next week" forecast was to week
+ * N+1's verified actual headcount. Three figures are always derived
+ * together from the same two numbers — Forecast Variance (workers) and
+ * Forecast Error (%) are the primary, signed metrics (see field comments
+ * above for the sign convention); Accuracy (%) is a secondary, bounded
+ * [0, 100] figure for display, never negative.
+ *
+ * Only pairs EXACTLY 7 days apart are compared — a missing week (any gap)
+ * is skipped entirely rather than compared across the gap, and a pair
+ * missing either value (forecast not entered, or the next week's actual
+ * not yet verified) is also skipped. This never invents a value for a
+ * week that wasn't reported, matching every other "Unavailable, not 0"
+ * rule in this codebase.
+ */
+export function computeForecastAccuracy(reports: WeeklyReportHistoryRow[]): ForecastAccuracyPoint[] {
+  const sorted = [...reports].sort((a, b) => a.weekStartDate.localeCompare(b.weekStartDate));
+  const points: ForecastAccuracyPoint[] = [];
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const week = sorted[i];
+    const nextWeek = sorted[i + 1];
+    if (week.nextWeekForecastHeadcount == null || nextWeek.actualHeadcount == null) continue;
+
+    const weekMs = new Date(`${week.weekStartDate}T00:00:00`).getTime();
+    const nextMs = new Date(`${nextWeek.weekStartDate}T00:00:00`).getTime();
+    const daysApart = Math.round((nextMs - weekMs) / 86_400_000);
+    if (daysApart !== 7) continue; // a missing week in between — never approximate across it
+
+    const forecast = week.nextWeekForecastHeadcount;
+    const actual = nextWeek.actualHeadcount;
+    const variance = actual - forecast;
+    const rawErrorPercent = forecast > 0 ? (variance / forecast) * 100 : null;
+    const errorPercent = rawErrorPercent == null ? null : Math.round(rawErrorPercent * 10) / 10;
+    const accuracyPercent = rawErrorPercent == null ? null : Math.max(0, Math.round((100 - Math.abs(rawErrorPercent)) * 10) / 10);
+
+    points.push({
+      forecastWeek: week.weekStartDate, actualWeek: nextWeek.weekStartDate,
+      forecastHeadcount: forecast, actualHeadcount: actual,
+      varianceHeadcount: variance, errorPercent, accuracyPercent,
+    });
+  }
+
+  return points;
+}

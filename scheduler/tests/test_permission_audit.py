@@ -97,6 +97,8 @@ EXPECTED_ROLES = {
     'project_issue_detail': {'default': V, 'PATCH': S, 'DELETE': S},
     'project_weekly_field_reports': {'default': V, 'POST': S},
     'project_weekly_field_report_detail': {'default': V, 'PATCH': S},
+    'project_weekly_field_report_import_preview': {'default': S},
+    'project_weekly_field_report_import_commit': {'default': S},
     'project_contractual_milestones': {'default': V, 'POST': S},
     'project_contractual_milestone_detail': {'default': V, 'PATCH': S, 'DELETE': S},
     'project_contractual_milestone_revisions': {'default': V},
